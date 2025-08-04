@@ -3,7 +3,7 @@ import telebot
 import json
 import os
 
-TOKEN = os.environ.get("TOKEN")
+TOKEN = os.environ.get("8160378826:AAHBNjyQ98VeO1nWwmvGonhcnikmroDFzEw")
 bot = telebot.TeleBot(TOKEN)
 
 # بارگذاری فایل‌های json

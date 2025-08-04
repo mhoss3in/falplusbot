@@ -37,7 +37,7 @@ async def fal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # تابع اصلی اجرا
 def main():
-    TOKEN = os.environ.get("TOKEN")
+    TOKEN = os.environ.get("BOT_TOKEN")
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))

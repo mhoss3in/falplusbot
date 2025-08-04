@@ -1,41 +1,141 @@
-
-import telebot
 import json
+import datetime
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import os
 
-TOKEN = os.environ.get("BOT_TOKEN")
-bot = telebot.TeleBot(BOT_TOKEN)
+TOKEN = os.environ.get("TOKEN")  # یا هر اسمی که خودت انتخاب کنی، فقط باید با Render هماهنگ باشه
+bot = telebot.TeleBot(TOKEN)
 
-# بارگذاری فایل‌های json
-with open("estekhare.json", "r", encoding="utf-8") as f:
-    estekhare = json.load(f)
+# === مسیر فایل‌ها ===
+SUBS_FILE = 'subscriptions.json'
+WALLET_FILE = 'wallets.json'
 
-with open("gooshayesh.json", "r", encoding="utf-8") as f:
-    gooshayesh = json.load(f)
+# === توابع کمکی فایل‌ها ===
+def load_subscriptions():
+    try:
+        with open(SUBS_FILE, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.decoder.JSONDecodeError):
+        return {}
 
-with open("hafez.json", "r", encoding="utf-8") as f:
-    hafez = json.load(f)
+def save_subscriptions(data):
+    with open(SUBS_FILE, 'w') as f:
+        json.dump(data, f)
 
-@bot.message_handler(commands=["start"])
-def send_welcome(message):
-    bot.reply_to(message, "سلام! خوش اومدی 🌟\n/estekhare\n/gooshayesh\n/fal")
+def load_wallets():
+    try:
+        with open(WALLET_FILE, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.decoder.JSONDecodeError):
+        return {}
 
-@bot.message_handler(commands=["estekhare"])
-def handle_estekhare(message):
-    topic = "ازدواج"
-    reply = estekhare.get(topic, "چیزی پیدا نشد.")
-    bot.send_message(message.chat.id, reply)
+def save_wallets(data):
+    with open(WALLET_FILE, 'w') as f:
+        json.dump(data, f)
 
-@bot.message_handler(commands=["gooshayesh"])
-def handle_gooshayesh(message):
-    topic = "رزق"
-    reply = gooshayesh.get(topic, "چیزی پیدا نشد.")
-    bot.send_message(message.chat.id, reply)
+# === بررسی اشتراک فعال ===
+def check_subscription(user_id):
+    subs = load_subscriptions()
+    if str(user_id) in subs:
+        expiry = datetime.datetime.strptime(subs[str(user_id)], '%Y-%m-%d')
+        return datetime.datetime.now() < expiry
+    return False
 
-@bot.message_handler(commands=["fal"])
-def handle_fal(message):
-    topic = "عشق"
-    reply = hafez.get(topic, "چیزی پیدا نشد.")
-    bot.send_message(message.chat.id, reply)
+# === شارژ کیف پول ===
+async def charge_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    wallets = load_wallets()
+    wallets[str(user_id)] = wallets.get(str(user_id), 0) + 1000  # شارژ فرضی 1000 تومان
+    save_wallets(wallets)
+    await update.message.reply_text("✅ کیف پول با موفقیت ۱۰۰۰ تومان شارژ شد.")
 
-bot.infinity_polling()
+# === خرید اشتراک ===
+async def buy_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    wallets = load_wallets()
+    balance = wallets.get(str(user_id), 0)
+    
+    price = 1000  # قیمت اشتراک یک روزه به‌صورت تستی
+
+    if balance >= price:
+        wallets[str(user_id)] = balance - price
+        save_wallets(wallets)
+
+        expiry_date = datetime.datetime.now() + datetime.timedelta(days=1)
+        subs = load_subscriptions()
+        subs[str(user_id)] = expiry_date.strftime('%Y-%m-%d')
+        save_subscriptions(subs)
+
+        await update.message.reply_text("🎉 اشتراک شما با موفقیت فعال شد تا فردا.")
+    else:
+        await update.message.reply_text("❌ موجودی کیف پول کافی نیست. لطفاً شارژ کنید.")
+
+# === دستور /start و منو ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        ["📿 استخاره", "🕊 دعای گشایش"],
+        ["📜 فال حافظ"],
+        ["💳 شارژ کیف پول", "🛒 خرید اشتراک"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(
+        keyboard, resize_keyboard=True, one_time_keyboard=False
+    )
+    await update.message.reply_text(
+        "سلام! به ربات فال‌پلاس خوش اومدی 🌟\nیکی از گزینه‌ها رو انتخاب کن:",
+        reply_markup=reply_markup
+    )
+
+# === دستور استخاره ===
+async def estekhare(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if check_subscription(user_id):
+        await update.message.reply_text("📿 نتیجه استخاره شما: خوب است! اعتماد کن و اقدام کن.")
+    else:
+        await update.message.reply_text("❌ ابتدا اشتراک تهیه کنید یا کیف پول را شارژ نمایید.")
+
+# === دعای گشایش ===
+async def gooshayesh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if check_subscription(user_id):
+        await update.message.reply_text("🕊 دعای گشایش:\nاللّهُمَّ افْتَحْ لِی أَبْوَابَ رَحْمَتِکَ...")
+    else:
+        await update.message.reply_text("❌ ابتدا اشتراک تهیه کنید یا کیف پول را شارژ نمایید.")
+
+# === فال حافظ ===
+async def fal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if check_subscription(user_id):
+        await update.message.reply_text("📜 فال حافظ شما:\nدل می‌رود ز دستم صاحب دلان خدا را...")
+    else:
+        await update.message.reply_text("❌ ابتدا اشتراک تهیه کنید یا کیف پول را شارژ نمایید.")
+
+# === مدیریت متن دکمه‌ها ===
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+
+    if text == "📿 استخاره":
+        await estekhare(update, context)
+    elif text == "🕊 دعای گشایش":
+        await gooshayesh(update, context)
+    elif text == "📜 فال حافظ":
+        await fal(update, context)
+    elif text == "💳 شارژ کیف پول":
+        await charge_wallet(update, context)
+    elif text == "🛒 خرید اشتراک":
+        await buy_subscription(update, context)
+    else:
+        await update.message.reply_text("⛔ دستور نامعتبر است. لطفاً از منو استفاده کنید.")
+
+# === راه‌اندازی ربات ===
+def main():
+    app = Application.builder().token("TOKEN").build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+
+    print("✅ ربات در حال اجراست...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()

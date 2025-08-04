@@ -3,8 +3,8 @@ import telebot
 import json
 import os
 
-TOKEN = os.environ.get("TOKEN")
-bot = telebot.TeleBot(TOKEN)
+TOKEN = os.environ.get("BOT_TOKEN")
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # بارگذاری فایل‌های json
 with open("estekhare.json", "r", encoding="utf-8") as f:

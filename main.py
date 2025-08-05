@@ -22,7 +22,7 @@ from telegram.ext import (
 
 # --- تنظیمات پایه ---
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = keyhaaaaan  # آیدی عددی ادمین را اینجا قرار دهید
+ADMIN_ID = 99857910  # آیدی عددی ادمین را اینجا قرار دهید
 if not TOKEN:
     raise ValueError("توکن ربات تنظیم نشده است!")
 

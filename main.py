@@ -3,14 +3,21 @@ import json
 import sqlite3
 import random
 from datetime import datetime, timedelta
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
+from telegram import (
+    Update, 
+    KeyboardButton, 
+    ReplyKeyboardMarkup,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
     ConversationHandler,
-    filters
+    filters,
+    CallbackQueryHandler
 )
 
 # --- تنظیمات پایه ---
@@ -86,10 +93,10 @@ def update_balance(user_id, amount, transaction_type="charge", approved=False):
             """, (user_id, amount, transaction_type, 'completed' if approved else 'pending', ref_id, approved))
             
             conn.commit()
-            return True
+            return True, ref_id
     except Exception as e:
         print(f"خطا در به‌روزرسانی موجودی: {e}")
-        return False
+        return False, None
 
 # --- توابع اصلی ربات ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -196,22 +203,25 @@ async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             """, (user_id, amount, ref_id))
             conn.commit()
         
-        # ارسال به ادمین برای تایید
+        # ارسال به ادمین برای تایید با دکمه‌های اینلاین
         admin_text = (
             f"📌 درخواست شارژ جدید\n\n"
             f"👤 کاربر: {update.effective_user.full_name} (آیدی: {user_id})\n"
             f"💰 مبلغ: {amount:,} تومان\n"
-            f"🆔 کد پیگیری: {ref_id}\n\n"
-            f"برای تایید:\n"
-            f"/approve_{ref_id}\n\n"
-            f"برای رد:\n"
-            f"/reject_{ref_id}"
+            f"🆔 کد پیگیری: {ref_id}"
         )
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ تایید پرداخت", callback_data=f"approve_{ref_id}")],
+            [InlineKeyboardButton("❌ رد پرداخت", callback_data=f"reject_{ref_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
         await context.bot.send_photo(
             chat_id=ADMIN_ID,
             photo=update.message.photo[-1].file_id,
-            caption=admin_text
+            caption=admin_text,
+            reply_markup=reply_markup
         )
         
         await update.message.reply_text(
@@ -223,13 +233,15 @@ async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("لطفاً تصویر رسید پرداخت را ارسال کنید.")
         return CONFIRM_PAYMENT
 
-async def approve_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تابع تایید پرداخت توسط ادمین"""
-    if update.effective_user.id != ADMIN_ID:
+async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id != ADMIN_ID:
+        await query.message.reply_text("شما دسترسی ادمین ندارید!")
         return
     
-    command = update.message.text
-    ref_id = command.split('_')[1]
+    action, ref_id = query.data.split('_')
     
     with sqlite3.connect("bot.db") as conn:
         cursor = conn.cursor()
@@ -241,67 +253,55 @@ async def approve_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if transaction:
             user_id, amount = transaction
             
-            # تایید تراکنش
-            cursor.execute("""
-                UPDATE transactions 
-                SET status = 'completed', admin_approved = 1 
-                WHERE ref_id = ?
-            """, (ref_id,))
-            
-            # افزایش موجودی کاربر
-            cursor.execute("""
-                UPDATE users 
-                SET balance = balance + ? 
-                WHERE user_id = ?
-            """, (amount, user_id))
-            
-            conn.commit()
-            
-            # اطلاع به کاربر
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"✅ پرداخت شما تایید شد!\n\n💰 مبلغ {amount:,} تومان به کیف پول شما اضافه شد."
-            )
-            
-            await update.message.reply_text(f"تراکنش {ref_id} با موفقیت تایید شد.")
+            if action == "approve":
+                # تایید تراکنش
+                cursor.execute("""
+                    UPDATE transactions 
+                    SET status = 'completed', admin_approved = 1 
+                    WHERE ref_id = ?
+                """, (ref_id,))
+                
+                # افزایش موجودی کاربر
+                cursor.execute("""
+                    UPDATE users 
+                    SET balance = balance + ? 
+                    WHERE user_id = ?
+                """, (amount, user_id))
+                
+                conn.commit()
+                
+                # اطلاع به کاربر
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"✅ پرداخت شما تایید شد!\n\n💰 مبلغ {amount:,} تومان به کیف پول شما اضافه شد."
+                )
+                
+                await query.edit_message_caption(
+                    caption=f"✅ تراکنش {ref_id} تایید شد.",
+                    reply_markup=None
+                )
+                
+            elif action == "reject":
+                # رد تراکنش
+                cursor.execute("""
+                    UPDATE transactions 
+                    SET status = 'rejected', admin_approved = 0 
+                    WHERE ref_id = ?
+                """, (ref_id,))
+                conn.commit()
+                
+                # اطلاع به کاربر
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="❌ درخواست شارژ شما توسط ادمین رد شد.\n\nلطفاً با پشتیبانی تماس بگیرید."
+                )
+                
+                await query.edit_message_caption(
+                    caption=f"❌ تراکنش {ref_id} رد شد.",
+                    reply_markup=None
+                )
         else:
-            await update.message.reply_text("تراکنش یافت نشد!")
-
-async def reject_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تابع رد پرداخت توسط ادمین"""
-    if update.effective_user.id != ADMIN_ID:
-        return
-    
-    command = update.message.text
-    ref_id = command.split('_')[1]
-    
-    with sqlite3.connect("bot.db") as conn:
-        cursor = conn.cursor()
-        
-        # دریافت اطلاعات تراکنش
-        cursor.execute("SELECT user_id FROM transactions WHERE ref_id = ?", (ref_id,))
-        transaction = cursor.fetchone()
-        
-        if transaction:
-            user_id = transaction[0]
-            
-            # رد تراکنش
-            cursor.execute("""
-                UPDATE transactions 
-                SET status = 'rejected', admin_approved = 0 
-                WHERE ref_id = ?
-            """, (ref_id,))
-            conn.commit()
-            
-            # اطلاع به کاربر
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="❌ درخواست شارژ شما توسط ادمین رد شد.\n\nلطفاً با پشتیبانی تماس بگیرید."
-            )
-            
-            await update.message.reply_text(f"تراکنش {ref_id} رد شد.")
-        else:
-            await update.message.reply_text("تراکنش یافت نشد!")
+            await query.message.reply_text("تراکنش یافت نشد!")
 
 # --- سایر توابع (سرویس‌ها و اشتراک) ---
 async def handle_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -445,9 +445,8 @@ def main():
     
     app.add_handler(conv_handler)
     
-    # دستورات ادمین
-    app.add_handler(CommandHandler("approve", approve_charge))
-    app.add_handler(CommandHandler("reject", reject_charge))
+    # اضافه کردن هندلر برای دکمه‌های اینلاین
+    app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^(approve|reject)_"))
     
     app.run_polling()
 

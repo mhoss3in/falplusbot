@@ -6,7 +6,7 @@ from telegram import Update
 TOKEN = os.environ.get("BOT_TOKEN")
 
 if not TOKEN:
-    raise ValueError("BOT_TOKEN is missing!"
+    raise ValueError("BOT_TOKEN is missing!")
 
 # لود داده‌ها از فایل‌ها
 with open('estekhare.json', encoding='utf-8') as f:

@@ -1,53 +1,92 @@
 import os
-from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram import Update
+import json
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 
-# گرفتن توکن از محیط
-TOKEN = os.environ.get("BOT_TOKEN")
+# متغیر محیطی برای توکن
+BOT_TOKEN = os.getenv("bot-token")
 
-if not TOKEN:
-    raise ValueError("BOT_TOKEN is missing!")
+# لود داده‌ها از فایل‌ها
+with open('estekhare.json', encoding='utf-8') as f:
+    estekhare_data = json.load(f)
 
-# بارگذاری فایل‌های json
-with open("estekhare.json", "r", encoding="utf-8") as f:
-    estekhare = json.load(f)
+with open('doa.json', encoding='utf-8') as f:
+    doa_data = json.load(f)
 
-with open("gooshayesh.json", "r", encoding="utf-8") as f:
-    gooshayesh = json.load(f)
+with open('hafez.json', encoding='utf-8') as f:
+    hafez_data = json.load(f)
 
-with open("hafez.json", "r", encoding="utf-8") as f:
-    hafez = json.load(f)
+# تعریف وضعیت‌ها
+MENU, ESTEKHARE_TOPIC, DOA_TOPIC, FAL_HAFEZ_TOPIC = range(4)
 
-# منوی اصلی با دکمه‌های پنجره‌ای
-def send_main_menu(chat_id):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    btn1 = types.KeyboardButton("📿 استخاره")
-    btn2 = types.KeyboardButton("🙏 دعای گشایش")
-    btn3 = types.KeyboardButton("📖 فال حافظ")
-    markup.add(btn1, btn2, btn3)
-    bot.send_message(chat_id, "یکی از گزینه‌های زیر رو انتخاب کن:", reply_markup=markup)
+# شروع ربات و نمایش منوی اصلی
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [KeyboardButton("📿 استخاره"), KeyboardButton("📜 دعای گشایش")],
+        [KeyboardButton("📖 فال حافظ")]
+    ]
+    await update.message.reply_text(
+        "سلام! یکی از گزینه‌ها را انتخاب کنید:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return MENU
 
-# هر پیامی بیاد، منوی اصلی رو نشون می‌دیم
-@bot.message_handler(func=lambda m: True)
-def all_messages_handler(message):
-    if message.text == "📿 استخاره":
-        bot.send_message(message.chat.id, "موضوع استخاره‌ات رو بنویس:")
-        # ادامه در مرحله بعد اضافه می‌شه
-    elif message.text == "🙏 دعای گشایش":
-        bot.send_message(message.chat.id, "موضوع دعای گشایش رو بنویس:")
-        # ادامه در مرحله بعد اضافه می‌شه
-    elif message.text == "📖 فال حافظ":
-        bot.send_message(message.chat.id, "موضوع فال حافظ رو بنویس:")
-        # ادامه در مرحله بعد اضافه می‌شه
+# هندلر منوی اصلی
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "📿 استخاره":
+        await update.message.reply_text("موضوع استخاره را وارد کن:")
+        return ESTEKHARE_TOPIC
+    elif text == "📜 دعای گشایش":
+        await update.message.reply_text("موضوع دعا را وارد کن:")
+        return DOA_TOPIC
+    elif text == "📖 فال حافظ":
+        await update.message.reply_text("موضوع موردنظر برای فال حافظ را وارد کن:")
+        return FAL_HAFEZ_TOPIC
     else:
-        send_main_menu(message.chat.id)
+        await update.message.reply_text("یکی از گزینه‌های منو را انتخاب کن.")
+        return MENU
 
-bot.infinity_polling()
-# اجرای برنامه
-def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
+# استخاره
+async def estekhare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = update.message.text.strip()
+    result = estekhare_data.get(topic, "موضوعی با این عنوان پیدا نشد.")
+    await update.message.reply_text(result)
+    return await start(update, context)
+
+# دعا
+async def doa_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = update.message.text.strip()
+    result = doa_data.get(topic, "موضوعی با این عنوان پیدا نشد.")
+    await update.message.reply_text(result)
+    return await start(update, context)
+
+# فال حافظ
+async def hafez_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = update.message.text.strip()
+    result = hafez_data.get(topic, "موضوعی با این عنوان پیدا نشد.")
+    await update.message.reply_text(result)
+    return await start(update, context)
+
+# کنسل کردن گفتگو
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("گفتگو لغو شد.")
+    return ConversationHandler.END
+
+# اجرای اپلیکیشن
+if __name__ == '__main__':
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)],
+            ESTEKHARE_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, estekhare_handler)],
+            DOA_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, doa_handler)],
+            FAL_HAFEZ_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, hafez_handler)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    app.add_handler(conv_handler)
     app.run_polling()
-
-if __name__ == "__main__":
-    main()

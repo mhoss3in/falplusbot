@@ -192,9 +192,75 @@ async def process_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("لطفا فقط عدد وارد کنید!")
         return CHARGE_AMOUNT
+async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """منوی مدیریت اشتراک"""
+    keyboard = [
+        [KeyboardButton("۱ ماهه - ۳۰,۰۰۰ تومان")],
+        [KeyboardButton("۱ ساله - ۲۵۰,۰۰۰ تومان")],
+        [KeyboardButton("🔙 بازگشت")]
+    ]
+    await update.message.reply_text(
+        "پلن اشتراک مورد نظر را انتخاب کنید:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return SUBSCRIPTION_MENU
 
+async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش انتخاب پلن اشتراک"""
+    plan_map = {
+        "۱ ماهه - ۳۰,۰۰۰ تومان": ("monthly", 30000),
+        "۱ ساله - ۲۵۰,۰۰۰ تومان": ("yearly", 250000)
+    }
+    
+    if update.message.text in plan_map:
+        plan, price = plan_map[update.message.text]
+        user_id = update.effective_user.id
+        user = get_user(user_id)
+        
+        if user and user[1] >= price:
+            # محاسبه تاریخ انقضا
+            expiry_date = (datetime.now() + timedelta(days=SUBSCRIPTIONS[plan]["days"])).strftime("%Y-%m-%d")
+            
+            # بروزرسانی اطلاعات کاربر
+            with sqlite3.connect("bot.db") as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE users 
+                    SET balance = balance - ?, subscription_expiry = ?
+                    WHERE user_id = ?
+                """, (price, expiry_date, user_id))
+                
+                # ثبت تراکنش
+                cursor.execute("""
+                    INSERT INTO transactions 
+                    (user_id, amount, type, status)
+                    VALUES (?, ?, 'subscription', 'completed')
+                """, (user_id, price))
+                conn.commit()
+            
+            await update.message.reply_text(
+                f"✅ اشتراک {plan} با موفقیت فعال شد!\n"
+                f"تاریخ انقضا: {expiry_date}"
+            )
+        else:
+            await update.message.reply_text(
+                "موجودی کیف پول شما برای این اشتراک کافی نیست!"
+            )
+    return MAIN_MENU
+
+async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تایید پرداخت کارت به کارت"""
+    if update.message.photo:
+        await update.message.reply_text(
+            "رسید پرداخت دریافت شد و در حال بررسی است.\n"
+            "پس از تایید، موجودی به کیف پول شما اضافه خواهد شد."
+        )
+        # در اینجا می‌توانید سیستم تایید دستی/خودکار را پیاده‌سازی کنید
+    return MAIN_MENU
 # --- اجرای ربات ---
 def main():
+    # مقداردهی اولیه دیتابیس
+    def main():
     # مقداردهی اولیه دیتابیس
     init_db()
     
@@ -216,6 +282,9 @@ def main():
             CHARGE_AMOUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, process_charge),
             ],
+            SUBSCRIPTION_MENU: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_subscription),
+            ],
             CONFIRM_PAYMENT: [
                 MessageHandler(filters.PHOTO, confirm_card_payment),
             ],
@@ -225,6 +294,6 @@ def main():
     
     app.add_handler(conv_handler)
     app.run_polling()
-
+    
 if __name__ == "__main__":
     main()

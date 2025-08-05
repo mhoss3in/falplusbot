@@ -103,20 +103,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("گفتگو لغو شد.")
     return ConversationHandler.END
 
-def main():
-    app = Application.builder().token(TOKEN).build()
-    
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
-        states={
-            MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)],
-            ESTEKHARE_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, estekhare_handler)],
-            GOOSHAYESH_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, gooshayesh_handler)],
-            FAL_HAFEZ_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, hafez_handler)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)]
-    )
-    async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("۱ ماهه - ۵۰ هزار تومان")],
         [KeyboardButton("۳ ماهه - ۱۲۰ هزار تومان")],
@@ -129,7 +116,8 @@ def main():
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
     return "CHOOSING_PLAN"
-    async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, plan: str):
+
+async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, plan: str):
     user_id = update.effective_user.id
     amount = SUBSCRIPTION_PLANS[plan]["price"]
     
@@ -150,7 +138,7 @@ def main():
     else:
         await update.message.reply_text("❌ خطا در اتصال به درگاه پرداخت.")
 
-    async def choose_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def choose_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     plan_mapping = {
         "۱ ماهه - ۵۰ هزار تومان": "monthly",
@@ -164,7 +152,7 @@ def main():
     else:
         await update.message.reply_text("لطفاً یک گزینه معتبر انتخاب کنید.")
     return ConversationHandler.END
-    
+
 def main():
     app = Application.builder().token(TOKEN).build()
     
@@ -192,3 +180,6 @@ def main():
     app.add_handler(conv_handler)
     app.add_handler(payment_conv)
     app.run_polling()
+
+if __name__ == "__main__":
+    main()

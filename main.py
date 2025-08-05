@@ -35,13 +35,13 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             phone TEXT,
-            subscription_expiry DATE
+            subscription_expiry DATE,
+            wallet_balance INTEGER DEFAULT 0
         )
     """)
     conn.commit()
     conn.close()
 
-# فراخوانی هنگام شروع ربات
 init_db()
 
 # --- پلن‌های اشتراک ---
@@ -53,12 +53,21 @@ SUBSCRIPTION_PLANS = {
 }
 
 # وضعیت‌ها
-MENU, ESTEKHARE_TOPIC, GOOSHAYESH_TOPIC, FAL_HAFEZ_TOPIC = range(4)
+(
+    MENU, 
+    ESTEKHARE_TOPIC, 
+    GOOSHAYESH_TOPIC, 
+    FAL_HAFEZ_TOPIC,
+    CHOOSING_PLAN,
+    WALLET_MENU
+) = range(6)
 
+# --- توابع اصلی ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("📿 استخاره"), KeyboardButton("📜 دعای گشایش")],
-        [KeyboardButton("📖 فال حافظ")]
+        [KeyboardButton("📖 فال حافظ")],
+        [KeyboardButton("👤 حساب کاربری"), KeyboardButton("💰 کیف پول")]
     ]
     await update.message.reply_text(
         "سلام! یکی از گزینه‌ها را انتخاب کنید:",
@@ -77,9 +86,104 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "📖 فال حافظ":
         await update.message.reply_text("موضوع موردنظر برای فال حافظ را وارد کن:")
         return FAL_HAFEZ_TOPIC
+    elif text == "👤 حساب کاربری":
+        return await account_handler(update, context)
+    elif text == "💰 کیف پول":
+        return await wallet_handler(update, context)
     else:
-        await update.message.reply_text("یکی از گزینه‌های منو را انتخاب کن.")
+        await update.message.reply_text("لطفاً یک گزینه معتبر انتخاب کنید.")
         return MENU
+
+async def account_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    conn = sqlite3.connect("bot.db")
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT subscription_expiry, wallet_balance FROM users WHERE user_id = ?", (user_id,))
+    user_data = cursor.fetchone()
+    
+    if user_data:
+        expiry_date = user_data[0] or "فعال نیست"
+        balance = user_data[1] or 0
+    else:
+        expiry_date = "فعال نیست"
+        balance = 0
+        cursor.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
+        conn.commit()
+    
+    conn.close()
+    
+    await update.message.reply_text(
+        f"👤 اطلاعات حساب کاربری:\n\n"
+        f"📅 اشتراک: {expiry_date}\n"
+        f"💰 موجودی کیف پول: {balance:,} تومان\n\n"
+        f"برای بازگشت /start را بزنید"
+    )
+    return MENU
+
+async def wallet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [KeyboardButton("➕ افزایش اعتبار")],
+        [KeyboardButton("🔙 بازگشت به منوی اصلی")]
+    ]
+    await update.message.reply_text(
+        "💰 مدیریت کیف پول:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return WALLET_MENU
+
+async def wallet_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "🔙 بازگشت به منوی اصلی":
+        return await start(update, context)
+    elif text == "➕ افزایش اعتبار":
+        await update.message.reply_text("این بخش در حال توسعه است...")
+        return WALLET_MENU
+    else:
+        await update.message.reply_text("لطفاً یک گزینه معتبر انتخاب کنید.")
+        return WALLET_MENU
+
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [KeyboardButton("۱ ماهه - ۵۰ هزار تومان")],
+        [KeyboardButton("۳ ماهه - ۱۲۰ هزار تومان")],
+        [KeyboardButton("۶ ماهه - ۲۰۰ هزار تومان")],
+        [KeyboardButton("۱ ساله - ۳۵۰ هزار تومان")],
+        [KeyboardButton("🔙 بازگشت به منوی اصلی")]
+    ]
+    await update.message.reply_text(
+        "پلن مورد نظر را انتخاب کنید:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return CHOOSING_PLAN
+
+async def choose_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "🔙 بازگشت به منوی اصلی":
+        return await start(update, context)
+    
+    plan_mapping = {
+        "۱ ماهه - ۵۰ هزار تومان": "monthly",
+        "۳ ماهه - ۱۲۰ هزار تومان": "3months",
+        "۶ ماهه - ۲۰۰ هزار تومان": "6months",
+        "۱ ساله - ۳۵۰ هزار تومان": "yearly"
+    }
+    
+    plan = plan_mapping.get(text)
+    if plan:
+        await handle_payment(update, context, plan)
+    else:
+        await update.message.reply_text("لطفاً یک گزینه معتبر انتخاب کنید.")
+    return CHOOSING_PLAN
+
+async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, plan: str):
+    amount = SUBSCRIPTION_PLANS[plan]["price"]
+    
+    # در اینجا می‌توانید درگاه پرداخت خود را پیاده‌سازی کنید
+    await update.message.reply_text(
+        f"✅ در حال اتصال به درگاه پرداخت برای اشتراک {plan} به مبلغ {amount:,} تومان...\n\n"
+        "این بخش در حال توسعه است. برای تست می‌توانید از دکمه بازگشت استفاده کنید."
+    )
 
 async def estekhare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic = update.message.text.strip()
@@ -100,85 +204,38 @@ async def hafez_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MENU
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("گفتگو لغو شد.")
-    return ConversationHandler.END
-
-async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [KeyboardButton("۱ ماهه - ۵۰ هزار تومان")],
-        [KeyboardButton("۳ ماهه - ۱۲۰ هزار تومان")],
-        [KeyboardButton("۶ ماهه - ۲۰۰ هزار تومان")],
-        [KeyboardButton("۱ ساله - ۳۵۰ هزار تومان")],
-        [KeyboardButton("🔙 برگشت")]
-    ]
-    await update.message.reply_text(
-        "پلن مورد نظر را انتخاب کنید:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
-    return "CHOOSING_PLAN"
-
-async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, plan: str):
-    user_id = update.effective_user.id
-    amount = SUBSCRIPTION_PLANS[plan]["price"]
-    
-    # درخواست به زیبال
-    response = requests.post(
-        "https://api.zibal.ir/v1/request",
-        json={
-            "merchant": "ZIBAL_MERCHANT_ID",  # جایگزین کن با مرچنت کد خودت!
-            "amount": amount,
-            "callbackUrl": "https://your-domain.com/callback",  # جایگزین کن با آدرس ریلوی تو
-            "description": f"اشتراک {plan}",
-        },
-    )
-    
-    if response.json().get("result") == 100:
-        payment_url = f"https://gateway.zibal.ir/start/{response.json()['trackId']}"
-        await update.message.reply_text(f"✅ برای پرداخت به لینک زیر بروید:\n\n{payment_url}")
-    else:
-        await update.message.reply_text("❌ خطا در اتصال به درگاه پرداخت.")
-
-async def choose_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    plan_mapping = {
-        "۱ ماهه - ۵۰ هزار تومان": "monthly",
-        "۳ ماهه - ۱۲۰ هزار تومان": "3months",
-        "۶ ماهه - ۲۰۰ هزار تومان": "6months",
-        "۱ ساله - ۳۵۰ هزار تومان": "yearly"
-    }
-    plan = plan_mapping.get(text)
-    if plan:
-        await handle_payment(update, context, plan)
-    else:
-        await update.message.reply_text("لطفاً یک گزینه معتبر انتخاب کنید.")
+    await update.message.reply_text("عملیات لغو شد.")
     return ConversationHandler.END
 
 def main():
     app = Application.builder().token(TOKEN).build()
     
-    # هندلر مکالمه اصلی
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
-            MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)],
-            ESTEKHARE_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, estekhare_handler)],
-            GOOSHAYESH_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, gooshayesh_handler)],
-            FAL_HAFEZ_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, hafez_handler)],
+            MENU: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler),
+            ],
+            ESTEKHARE_TOPIC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, estekhare_handler),
+            ],
+            GOOSHAYESH_TOPIC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, gooshayesh_handler),
+            ],
+            FAL_HAFEZ_TOPIC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, hafez_handler),
+            ],
+            CHOOSING_PLAN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, choose_plan),
+            ],
+            WALLET_MENU: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, wallet_menu_handler),
+            ],
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     
-    # هندلر اشتراک
-    payment_conv = ConversationHandler(
-        entry_points=[CommandHandler("subscribe", subscribe)],
-        states={
-            "CHOOSING_PLAN": [MessageHandler(filters.TEXT & ~filters.COMMAND, choose_plan)]
-        },
-        fallbacks=[]
-    )
-    
     app.add_handler(conv_handler)
-    app.add_handler(payment_conv)
     app.run_polling()
 
 if __name__ == "__main__":

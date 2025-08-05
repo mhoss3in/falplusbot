@@ -22,8 +22,7 @@ from telegram.ext import (
 
 # --- تنظیمات پایه ---
 TOKEN = os.environ.get("BOT_TOKEN")
-# آیدی ادمین از متغیر محیطی دریافت می‌شود
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # مقدار پیش‌فرض 0 اگر متغیر تنظیم نشده باشد
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # دریافت از متغیر محیطی
 if not TOKEN:
     raise ValueError("توکن ربات تنظیم نشده است!")
 if ADMIN_ID == 0:
@@ -80,6 +79,13 @@ def get_user(user_id):
         cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         return cursor.fetchone()
 
+def get_user_balance(user_id):
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        return result[0] if result else 0
+
 def update_balance(user_id, amount, transaction_type="charge", approved=False):
     try:
         with sqlite3.connect("bot.db") as conn:
@@ -113,7 +119,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("📋 تاریخچه پرداخت‌ها")]
     ]
     
-    # پیام خوش‌آمدگویی جدید
     await update.message.reply_text(
         "🌟 به ربات ما خوش آمدید! 🌟\n\n"
         "لطفاً از منوی زیر گزینه مورد نظر خود را انتخاب کنید:\n\n"
@@ -180,7 +185,7 @@ async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             """, (user_id, amount, ref_id))
             conn.commit()
         
-        # ارسال به ادمین برای تایید با دکمه‌های اینلاین
+        # ارسال به ادمین برای تایید
         admin_text = (
             f"📌 درخواست شارژ جدید\n\n"
             f"👤 کاربر: {update.effective_user.full_name} (آیدی: {user_id})\n"
@@ -223,58 +228,98 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
     
     with sqlite3.connect("bot.db") as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT user_id, amount FROM transactions WHERE ref_id = ?", (ref_id,))
+        
+        # دریافت اطلاعات تراکنش
+        cursor.execute("""
+            SELECT user_id, amount 
+            FROM transactions 
+            WHERE ref_id = ? AND status = 'pending'
+        """, (ref_id,))
         transaction = cursor.fetchone()
         
         if not transaction:
-            await query.edit_message_text("تراکنش یافت نشد!")
+            await query.edit_message_text("تراکنش یافت نشد یا قبلاً پردازش شده!")
             return
             
         user_id, amount = transaction
         
         if action == "approve":
-            # تایید تراکنش
-            cursor.execute("""
-                UPDATE transactions 
-                SET status = 'completed', admin_approved = 1 
-                WHERE ref_id = ?
-            """, (ref_id,))
-            
-            # افزایش موجودی کاربر
-            cursor.execute("""
-                UPDATE users 
-                SET balance = balance + ? 
-                WHERE user_id = ?
-            """, (amount, user_id))
-            
-            conn.commit()
-            
-            # اطلاع به کاربر
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"✅ پرداخت شما تایید شد!\n\n💰 مبلغ {amount:,} تومان به کیف پول شما اضافه شد."
-            )
-            
-            # ویرایش پیام اصلی
-            await query.edit_message_caption(
-                caption=f"✅ تراکنش {ref_id} تایید شد.",
-                reply_markup=None
-            )
-            
+            try:
+                # شروع تراکنش دیتابیس
+                cursor.execute("BEGIN TRANSACTION")
+                
+                # اطمینان از وجود کاربر
+                cursor.execute("""
+                    INSERT OR IGNORE INTO users (user_id, balance) 
+                    VALUES (?, 0)
+                """, (user_id,))
+                
+                # افزایش موجودی کاربر
+                cursor.execute("""
+                    UPDATE users 
+                    SET balance = balance + ? 
+                    WHERE user_id = ?
+                """, (amount, user_id))
+                
+                # تایید تراکنش
+                cursor.execute("""
+                    UPDATE transactions 
+                    SET status = 'completed', admin_approved = 1 
+                    WHERE ref_id = ? AND status = 'pending'
+                """, (ref_id,))
+                
+                # بررسی تعداد ردیف‌های تأثیرپذیرفته
+                if cursor.rowcount == 0:
+                    raise Exception("هیچ رکورد کاربری به‌روزرسانی نشد")
+                
+                # تأیید تغییرات
+                conn.commit()
+                
+                # اطلاع به کاربر
+                new_balance = get_user_balance(user_id)
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=f"✅ پرداخت شما تایید شد!\n\n"
+                             f"💰 مبلغ {amount:,} تومان به کیف پول شما اضافه شد.\n"
+                             f"💳 موجودی جدید: {new_balance:,} تومان"
+                    )
+                except Exception as e:
+                    print(f"خطا در ارسال پیام به کاربر: {e}")
+                
+                # ویرایش پیام اصلی
+                await query.edit_message_caption(
+                    caption=f"✅ تراکنش {ref_id} تایید شد.\n\n"
+                           f"مبلغ {amount:,} تومان به حساب کاربر اضافه شد.\n"
+                           f"موجودی جدید کاربر: {new_balance:,} تومان",
+                    reply_markup=None
+                )
+                
+            except Exception as e:
+                conn.rollback()
+                print(f"خطا در پردازش تراکنش: {e}")
+                await query.edit_message_caption(
+                    caption=f"❌ خطا در پردازش تراکنش: {str(e)}",
+                    reply_markup=None
+                )
+                
         elif action == "reject":
             # رد تراکنش
             cursor.execute("""
                 UPDATE transactions 
                 SET status = 'rejected', admin_approved = 0 
-                WHERE ref_id = ?
+                WHERE ref_id = ? AND status = 'pending'
             """, (ref_id,))
             conn.commit()
             
             # اطلاع به کاربر
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="❌ درخواست شارژ شما توسط ادمین رد شد.\n\nلطفاً با پشتیبانی تماس بگیرید."
-            )
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="❌ درخواست شارژ شما توسط ادمین رد شد.\n\nلطفاً با پشتیبانی تماس بگیرید."
+                )
+            except Exception as e:
+                print(f"خطا در ارسال پیام به کاربر: {e}")
             
             # ویرایش پیام اصلی
             await query.edit_message_caption(

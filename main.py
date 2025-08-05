@@ -43,3 +43,11 @@ def all_messages_handler(message):
         send_main_menu(message.chat.id)
 
 bot.infinity_polling()
+# اجرای برنامه
+def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()

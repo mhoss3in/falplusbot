@@ -1,10 +1,12 @@
 import os
-import json
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, ConversationHandler
+from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update
 
-# متغیر محیطی برای توکن
-BOT_TOKEN = os.getenv("bot-token")
+# گرفتن توکن از محیط
+TOKEN = os.environ.get("BOT_TOKEN")
+
+if not TOKEN:
+    raise ValueError("BOT_TOKEN is missing!"
 
 # لود داده‌ها از فایل‌ها
 with open('estekhare.json', encoding='utf-8') as f:

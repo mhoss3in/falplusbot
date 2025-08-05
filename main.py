@@ -15,6 +15,7 @@ from telegram.ext import (
 
 # --- تنظیمات پایه ---
 TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID = 123456789  # آیدی عددی ادمین را اینجا قرار دهید
 if not TOKEN:
     raise ValueError("توکن ربات تنظیم نشده است!")
 
@@ -35,11 +36,11 @@ SUBSCRIPTIONS = {
 # --- وضعیت‌های مکالمه ---
 (MAIN_MENU, SERVICE_SELECTION, 
  PAYMENT_METHOD, CHARGE_AMOUNT,
- SUBSCRIPTION_MENU, CONFIRM_PAYMENT) = range(6)
+ SUBSCRIPTION_MENU, CONFIRM_PAYMENT,
+ WAIT_FOR_AMOUNT) = range(7)
 
 # --- توابع دیتابیس ---
 def init_db():
-    """ایجاد و تنظیم ساختار دیتابیس"""
     with sqlite3.connect("bot.db") as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -58,34 +59,32 @@ def init_db():
                 status TEXT,
                 date TEXT DEFAULT CURRENT_TIMESTAMP,
                 ref_id TEXT,
+                admin_approved BOOLEAN DEFAULT 0,
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
         conn.commit()
 
 def get_user(user_id):
-    """دریافت اطلاعات کاربر از دیتابیس"""
     with sqlite3.connect("bot.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         return cursor.fetchone()
 
-def update_balance(user_id, amount):
-    """به‌روزرسانی موجودی کاربر با مدیریت تراکنش"""
+def update_balance(user_id, amount, transaction_type="charge", approved=False):
     try:
         with sqlite3.connect("bot.db") as conn:
             cursor = conn.cursor()
-            # ایجاد کاربر اگر وجود نداشته باشد
             cursor.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (user_id,))
-            # به‌روزرسانی موجودی
             cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
-            # ثبت تراکنش
-            ref_id = f"charge_{random.randint(10000, 99999)}"
+            
+            ref_id = f"{transaction_type}_{random.randint(10000, 99999)}"
             cursor.execute("""
                 INSERT INTO transactions 
-                (user_id, amount, type, status, ref_id)
-                VALUES (?, ?, 'charge', 'completed', ?)
-            """, (user_id, amount, ref_id))
+                (user_id, amount, type, status, ref_id, admin_approved)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user_id, amount, transaction_type, 'completed' if approved else 'pending', ref_id, approved))
+            
             conn.commit()
             return True
     except Exception as e:
@@ -94,7 +93,6 @@ def update_balance(user_id, amount):
 
 # --- توابع اصلی ربات ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """منوی اصلی ربات"""
     user = get_user(update.effective_user.id)
     balance = user[1] if user else 0
     sub_expiry = user[2] if user and user[2] else "غیرفعال"
@@ -115,7 +113,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 async def wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """منوی مدیریت کیف پول"""
     user = get_user(update.effective_user.id)
     balance = user[1] if user else 0
     
@@ -134,7 +131,6 @@ async def wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return PAYMENT_METHOD
 
 async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش انتخاب روش پرداخت"""
     text = update.message.text
     
     if text == "💳 شارژ با درگاه پرداخت":
@@ -144,85 +140,171 @@ async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return CHARGE_AMOUNT
     elif text == "📲 شارژ با کارت به کارت":
+        keyboard = [
+            [KeyboardButton("۱۰,۰۰۰ تومان"), KeyboardButton("۵۰,۰۰۰ تومان")],
+            [KeyboardButton("۱۰۰,۰۰۰ تومان"), KeyboardButton("مبلغ دلخواه")],
+            [KeyboardButton("🔙 بازگشت")]
+        ]
         await update.message.reply_text(
-            "برای شارژ کیف پول از طریق کارت به کارت:\n\n"
-            "شماره کارت: 6037-XXXX-XXXX-XXXX\n"
-            "به نام: [نام صاحب کارت]\n\n"
-            "پس از واریز، تصویر رسید را ارسال کنید."
+            "لطفاً مبلغ مورد نظر برای شارژ را انتخاب کنید:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
-        return CONFIRM_PAYMENT
+        return WAIT_FOR_AMOUNT
     elif text == "🔙 بازگشت به منوی اصلی":
         return await start(update, context)
     
     return PAYMENT_METHOD
 
-async def process_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش شارژ کیف پول"""
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
+async def wait_for_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
     
     if text == "🔙 بازگشت":
         return await wallet_menu(update, context)
     
+    if text == "مبلغ دلخواه":
+        await update.message.reply_text("لطفاً مبلغ مورد نظر را وارد کنید (تومان):")
+        return WAIT_FOR_AMOUNT
+    
     try:
-        # پردازش مبلغ ورودی
-        amount = int(text.replace(',', '').replace('،', '').replace(' ', ''))
+        amount = int(text.replace(',', '').replace('،', '').replace(' ', '').replace('تومان', ''))
+        context.user_data['charge_amount'] = amount
         
-        if amount < 10000:
-            await update.message.reply_text("حداقل مبلغ شارژ ۱۰,۰۰۰ تومان است.")
-            return CHARGE_AMOUNT
-        
-        # انجام عملیات شارژ
-        if update_balance(user_id, amount):
-            user = get_user(user_id)
-            await update.message.reply_text(
-                f"✅ موجودی شما با موفقیت {amount:,} تومان شارژ شد!\n"
-                f"💰 موجودی جدید: {user[1]:,} تومان\n\n"
-                "برای بازگشت به منوی اصلی /start را بزنید."
-            )
-            return MAIN_MENU
-        else:
-            await update.message.reply_text(
-                "⚠️ خطا در پردازش درخواست شارژ!\n"
-                "لطفاً مجدداً تلاش کنید."
-            )
-            return CHARGE_AMOUNT
-            
-    except ValueError:
         await update.message.reply_text(
-            "⚠️ لطفاً فقط عدد وارد کنید!\n"
-            "مثال:\n50000\nیا\n50,000"
-        )
-        return CHARGE_AMOUNT
-
-async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تایید پرداخت کارت به کارت"""
-    if update.message.photo:
-        # در اینجا می‌توانید سیستم تایید دستی/خودکار را پیاده‌سازی کنید
-        amount = 10000  # مقدار پیش‌فرض یا از کاربر دریافت شود
-        user_id = update.effective_user.id
-        
-        if update_balance(user_id, amount):
-            await update.message.reply_text(
-                f"✅ پرداخت شما تأیید و مبلغ {amount:,} تومان به کیف پول شما اضافه شد!\n"
-                "برای بازگشت به منوی اصلی /start را بزنید."
-            )
-        else:
-            await update.message.reply_text(
-                "⚠️ خطا در ثبت پرداخت!\n"
-                "لطفاً با پشتیبانی تماس بگیرید."
-            )
-    else:
-        await update.message.reply_text(
-            "لطفاً تصویر رسید پرداخت را ارسال کنید."
+            f"برای شارژ {amount:,} تومان از طریق کارت به کارت:\n\n"
+            "شماره کارت: 6037-XXXX-XXXX-XXXX\n"
+            "به نام: [نام صاحب کارت]\n\n"
+            "پس از واریز، تصویر رسید را ارسال کنید."
         )
         return CONFIRM_PAYMENT
+    except ValueError:
+        await update.message.reply_text("لطفاً یک مبلغ معتبر وارد کنید!")
+        return WAIT_FOR_AMOUNT
+
+async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.photo:
+        user_id = update.effective_user.id
+        amount = context.user_data.get('charge_amount', 10000)  # مقدار پیش‌فرض 10,000 تومان
+        
+        # ثبت تراکنش به صورت pending
+        with sqlite3.connect("bot.db") as conn:
+            cursor = conn.cursor()
+            ref_id = f"card_{random.randint(10000, 99999)}"
+            cursor.execute("""
+                INSERT INTO transactions 
+                (user_id, amount, type, status, ref_id, admin_approved)
+                VALUES (?, ?, 'charge', 'pending', ?, 0)
+            """, (user_id, amount, ref_id))
+            conn.commit()
+        
+        # ارسال به ادمین برای تایید
+        admin_text = (
+            f"📌 درخواست شارژ جدید\n\n"
+            f"👤 کاربر: {update.effective_user.full_name} (آیدی: {user_id})\n"
+            f"💰 مبلغ: {amount:,} تومان\n"
+            f"🆔 کد پیگیری: {ref_id}\n\n"
+            f"برای تایید:\n"
+            f"/approve_{ref_id}\n\n"
+            f"برای رد:\n"
+            f"/reject_{ref_id}"
+        )
+        
+        await context.bot.send_photo(
+            chat_id=ADMIN_ID,
+            photo=update.message.photo[-1].file_id,
+            caption=admin_text
+        )
+        
+        await update.message.reply_text(
+            "✅ رسید پرداخت دریافت شد و برای تایید به ادمین ارسال شد.\n"
+            "پس از تایید ادمین، موجودی به کیف پول شما اضافه خواهد شد."
+        )
+        return MAIN_MENU
+    else:
+        await update.message.reply_text("لطفاً تصویر رسید پرداخت را ارسال کنید.")
+        return CONFIRM_PAYMENT
+
+async def approve_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تابع تایید پرداخت توسط ادمین"""
+    if update.effective_user.id != ADMIN_ID:
+        return
     
-    return MAIN_MENU
+    command = update.message.text
+    ref_id = command.split('_')[1]
+    
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        
+        # دریافت اطلاعات تراکنش
+        cursor.execute("SELECT user_id, amount FROM transactions WHERE ref_id = ?", (ref_id,))
+        transaction = cursor.fetchone()
+        
+        if transaction:
+            user_id, amount = transaction
+            
+            # تایید تراکنش
+            cursor.execute("""
+                UPDATE transactions 
+                SET status = 'completed', admin_approved = 1 
+                WHERE ref_id = ?
+            """, (ref_id,))
+            
+            # افزایش موجودی کاربر
+            cursor.execute("""
+                UPDATE users 
+                SET balance = balance + ? 
+                WHERE user_id = ?
+            """, (amount, user_id))
+            
+            conn.commit()
+            
+            # اطلاع به کاربر
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"✅ پرداخت شما تایید شد!\n\n💰 مبلغ {amount:,} تومان به کیف پول شما اضافه شد."
+            )
+            
+            await update.message.reply_text(f"تراکنش {ref_id} با موفقیت تایید شد.")
+        else:
+            await update.message.reply_text("تراکنش یافت نشد!")
+
+async def reject_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تابع رد پرداخت توسط ادمین"""
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    command = update.message.text
+    ref_id = command.split('_')[1]
+    
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        
+        # دریافت اطلاعات تراکنش
+        cursor.execute("SELECT user_id FROM transactions WHERE ref_id = ?", (ref_id,))
+        transaction = cursor.fetchone()
+        
+        if transaction:
+            user_id = transaction[0]
+            
+            # رد تراکنش
+            cursor.execute("""
+                UPDATE transactions 
+                SET status = 'rejected', admin_approved = 0 
+                WHERE ref_id = ?
+            """, (ref_id,))
+            conn.commit()
+            
+            # اطلاع به کاربر
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="❌ درخواست شارژ شما توسط ادمین رد شد.\n\nلطفاً با پشتیبانی تماس بگیرید."
+            )
+            
+            await update.message.reply_text(f"تراکنش {ref_id} رد شد.")
+        else:
+            await update.message.reply_text("تراکنش یافت نشد!")
 
 # --- سایر توابع (سرویس‌ها و اشتراک) ---
 async def handle_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش درخواست خدمات"""
     service_map = {
         "📿 استخاره": ("estekhare", PRICES["estekhare"]),
         "📜 دعای گشایش": ("gooshayesh", PRICES["gooshayesh"]),
@@ -237,7 +319,7 @@ async def handle_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user and user[2] and datetime.strptime(user[2], "%Y-%m-%d") > datetime.now():
             await deliver_service(update, service)
         elif user and user[1] >= price:
-            update_balance(user_id, -price)
+            update_balance(user_id, -price, "payment", True)
             await deliver_service(update, service)
         else:
             await update.message.reply_text(
@@ -247,7 +329,6 @@ async def handle_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 async def deliver_service(update: Update, service: str):
-    """ارسال نتیجه سرویس"""
     with open(f'{service}.json', encoding='utf-8') as f:
         data = json.load(f)
     result = random.choice(list(data.values()))
@@ -258,7 +339,6 @@ async def deliver_service(update: Update, service: str):
     )
 
 async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """منوی اشتراک"""
     keyboard = [
         [KeyboardButton("۱ ماهه - ۳۰,۰۰۰ تومان")],
         [KeyboardButton("۳ ماهه - ۸۰,۰۰۰ تومان")],
@@ -273,7 +353,6 @@ async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SUBSCRIPTION_MENU
 
 async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش انتخاب اشتراک"""
     text = update.message.text
     if text == "🔙 بازگشت به منوی اصلی":
         return await start(update, context)
@@ -303,8 +382,8 @@ async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
                 
                 cursor.execute("""
                     INSERT INTO transactions 
-                    (user_id, amount, type, status)
-                    VALUES (?, ?, 'subscription', 'completed')
+                    (user_id, amount, type, status, admin_approved)
+                    VALUES (?, ?, 'subscription', 'completed', 1)
                 """, (user_id, price))
                 conn.commit()
             
@@ -345,7 +424,11 @@ def main():
                 MessageHandler(filters.Regex("^🔙 بازگشت"), start)
             ],
             CHARGE_AMOUNT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, process_charge),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: process_charge(u,c)),
+                MessageHandler(filters.Regex("^🔙 بازگشت"), wallet_menu)
+            ],
+            WAIT_FOR_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, wait_for_amount),
                 MessageHandler(filters.Regex("^🔙 بازگشت"), wallet_menu)
             ],
             SUBSCRIPTION_MENU: [
@@ -354,13 +437,18 @@ def main():
             ],
             CONFIRM_PAYMENT: [
                 MessageHandler(filters.PHOTO, confirm_card_payment),
-                MessageHandler(filters.Regex("^🔙 بازگشت"), start)
+                MessageHandler(filters.Regex("^🔙 بازگشت"), wallet_menu)
             ],
         },
         fallbacks=[CommandHandler('cancel', start)]
     )
     
     app.add_handler(conv_handler)
+    
+    # دستورات ادمین
+    app.add_handler(CommandHandler("approve", approve_charge))
+    app.add_handler(CommandHandler("reject", reject_charge))
+    
     app.run_polling()
 
 if __name__ == "__main__":

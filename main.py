@@ -165,25 +165,49 @@ async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def process_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    
+    # بررسی دکمه بازگشت
     if text == "🔙 بازگشت":
         return await wallet_menu(update, context)
     
     try:
+        # تبدیل متن به عدد
         amount = int(text)
+        
+        # بررسی حداقل مبلغ
         if amount < 10000:
             await update.message.reply_text("حداقل مبلغ شارژ ۱۰,۰۰۰ تومان است.")
             return CHARGE_AMOUNT
         
+        # ایجاد کد پیگیری
         ref_id = f"zibal_{random.randint(10000, 99999)}"
+        
+        # افزایش موجودی کاربر
         update_balance(update.effective_user.id, amount)
         
+        # ثبت تراکنش
+        with sqlite3.connect("bot.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO transactions 
+                (user_id, amount, type, status, ref_id)
+                VALUES (?, ?, 'charge', 'completed', ?)
+            """, (update.effective_user.id, amount, ref_id))
+            conn.commit()
+        
+        # ارسال پیام موفقیت
         await update.message.reply_text(
             f"✅ موجودی شما با موفقیت {amount:,} تومان شارژ شد!\n"
-            f"کد پیگیری: {ref_id}"
+            f"کد پیگیری: {ref_id}\n\n"
+            f"💰 موجودی جدید: {get_user(update.effective_user.id)[1]:,} تومان"
         )
         return await start(update, context)
+        
     except ValueError:
-        await update.message.reply_text("لطفا فقط عدد وارد کنید!")
+        await update.message.reply_text(
+            "⚠️ لطفاً فقط عدد وارد کنید!\n"
+            "مثال: 50000 یا 100000"
+        )
         return CHARGE_AMOUNT
 
 async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):

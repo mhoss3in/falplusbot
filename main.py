@@ -2,6 +2,7 @@ import os
 import json
 import sqlite3
 import random
+import logging
 from datetime import datetime, timedelta
 from telegram import (
     Update, 
@@ -17,16 +18,23 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
     filters,
-    CallbackQueryHandler
+    CallbackQueryHandler,
+    CallbackContext
 )
 
 # --- تنظیمات پایه ---
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-if not TOKEN:
-    raise ValueError("توکن ربات تنظیم نشده است!")
-if ADMIN_ID == 0:
-    raise ValueError("آیدی ادمین تنظیم نشده است!")
+CARD_NUMBER = os.environ.get("CARD_NUMBER", "6037-XXXX-XXXX-XXXX")
+CARD_OWNER = os.environ.get("CARD_OWNER", "نام صاحب کارت")
+
+# --- تنظیمات لاگ‌گیری ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    filename='bot.log'
+)
+logger = logging.getLogger(__name__)
 
 # --- تعرفه‌ها و پلن‌ها ---
 PRICES = {
@@ -46,21 +54,24 @@ SUBSCRIPTIONS = {
 (MAIN_MENU, SERVICE_SELECTION, 
  TOPIC_INPUT, CHARGE_AMOUNT, 
  SUBSCRIPTION_MENU, CONFIRM_PAYMENT,
- PAYMENT_HISTORY) = range(7)
+ PAYMENT_HISTORY, SERVICE_HISTORY) = range(8)
 
-# --- توابع دیتابیس ---
-def init_db():
-    with sqlite3.connect("bot.db") as conn:
-        cursor = conn.cursor()
-        # جدول کاربران
+# --- مدیریت پایگاه داده ---
+class DatabaseManager:
+    def __init__(self):
+        self.conn = sqlite3.connect("bot.db", check_same_thread=False)
+        self.init_db()
+    
+    def init_db(self):
+        cursor = self.conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 balance INTEGER DEFAULT 0,
-                subscription_expiry TEXT
+                subscription_expiry TEXT,
+                register_date TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # جدول تراکنش‌ها
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,7 +85,6 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
-        # جدول تاریخچه خدمات
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS service_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,25 +96,22 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
-        conn.commit()
-
-def get_user(user_id):
-    with sqlite3.connect("bot.db") as conn:
-        cursor = conn.cursor()
+        self.conn.commit()
+    
+    def get_user(self, user_id):
+        cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         return cursor.fetchone()
-
-def get_user_balance(user_id):
-    with sqlite3.connect("bot.db") as conn:
-        cursor = conn.cursor()
+    
+    def get_user_balance(self, user_id):
+        cursor = self.conn.cursor()
         cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
         result = cursor.fetchone()
         return result[0] if result else 0
-
-def update_balance(user_id, amount, transaction_type="charge", approved=False):
-    try:
-        with sqlite3.connect("bot.db") as conn:
-            cursor = conn.cursor()
+    
+    def update_balance(self, user_id, amount, transaction_type="charge", approved=False):
+        try:
+            cursor = self.conn.cursor()
             cursor.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (user_id,))
             cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
             
@@ -115,55 +122,110 @@ def update_balance(user_id, amount, transaction_type="charge", approved=False):
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (user_id, amount, transaction_type, 'completed' if approved else 'pending', ref_id, approved))
             
-            conn.commit()
+            self.conn.commit()
             return True, ref_id
-    except Exception as e:
-        print(f"خطا در به‌روزرسانی موجودی: {e}")
-        return False, None
-
-def save_service_history(user_id, service_type, topic, result):
-    with sqlite3.connect("bot.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO service_history 
-            (user_id, service_type, topic, result)
-            VALUES (?, ?, ?, ?)
-        """, (user_id, service_type, topic, result))
-        conn.commit()
-
-def get_user_service_history(user_id, service_type=None):
-    with sqlite3.connect("bot.db") as conn:
-        cursor = conn.cursor()
+        except Exception as e:
+            logger.error(f"خطا در به‌روزرسانی موجودی: {e}")
+            return False, None
+    
+    def save_service_history(self, user_id, service_type, topic, result):
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO service_history 
+                (user_id, service_type, topic, result)
+                VALUES (?, ?, ?, ?)
+            """, (user_id, service_type, topic, result))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"خطا در ذخیره تاریخچه خدمات: {e}")
+            return False
+    
+    def get_user_service_history(self, user_id, service_type=None, limit=10, offset=0):
+        cursor = self.conn.cursor()
         if service_type:
             cursor.execute("""
                 SELECT topic, result, date 
                 FROM service_history 
                 WHERE user_id = ? AND service_type = ?
                 ORDER BY date DESC
-            """, (user_id, service_type))
+                LIMIT ? OFFSET ?
+            """, (user_id, service_type, limit, offset))
         else:
             cursor.execute("""
                 SELECT service_type, topic, result, date 
                 FROM service_history 
                 WHERE user_id = ?
                 ORDER BY date DESC
-            """, (user_id,))
+                LIMIT ? OFFSET ?
+            """, (user_id, limit, offset))
         return cursor.fetchall()
-
-def get_transaction_history(user_id):
-    with sqlite3.connect("bot.db") as conn:
-        cursor = conn.cursor()
+    
+    def get_transaction_history(self, user_id, limit=10, offset=0):
+        cursor = self.conn.cursor()
         cursor.execute("""
             SELECT type, amount, status, date 
             FROM transactions 
             WHERE user_id = ?
             ORDER BY date DESC
-        """, (user_id,))
+            LIMIT ? OFFSET ?
+        """, (user_id, limit, offset))
         return cursor.fetchall()
+    
+    def update_subscription(self, user_id, plan_type):
+        try:
+            days = SUBSCRIPTIONS[plan_type]["days"]
+            price = SUBSCRIPTIONS[plan_type]["price"]
+            expiry_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+            
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                UPDATE users 
+                SET balance = balance - ?, subscription_expiry = ?
+                WHERE user_id = ?
+            """, (price, expiry_date, user_id))
+            
+            cursor.execute("""
+                INSERT INTO transactions 
+                (user_id, amount, type, status, admin_approved)
+                VALUES (?, ?, 'subscription', 'completed', 1)
+            """, (user_id, price))
+            
+            self.conn.commit()
+            return True, expiry_date
+        except Exception as e:
+            logger.error(f"خطا در بروزرسانی اشتراک: {e}")
+            return False, None
 
-# --- توابع اصلی ربات ---
+# --- مقداردهی اولیه ---
+db = DatabaseManager()
+
+# --- مدیریت پرداخت ---
+class PaymentManager:
+    @staticmethod
+    def generate_payment_receipt(amount):
+        return (
+            f"برای شارژ {amount:,} تومان از طریق کارت به کارت:\n\n"
+            f"شماره کارت: {CARD_NUMBER}\n"
+            f"به نام: {CARD_OWNER}\n\n"
+            "پس از واریز، تصویر رسید را ارسال کنید."
+        )
+    
+    @staticmethod
+    def validate_amount(amount_text):
+        try:
+            amount = int(amount_text.replace(',', '').replace('،', '').replace(' ', '').replace('تومان', ''))
+            if amount <= 0:
+                return False, 0
+            return True, amount
+        except ValueError:
+            return False, 0
+
+# --- دستورات ربات ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = get_user(update.effective_user.id)
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
     balance = user[1] if user else 0
     sub_expiry = user[2] if user and user[2] else "غیرفعال"
 
@@ -193,7 +255,7 @@ async def handle_service_selection(update: Update, context: ContextTypes.DEFAULT
     if update.message.text in service_map:
         context.user_data['selected_service'] = service_map[update.message.text]
         await update.message.reply_text(
-            "لطفاً موضوع مورد نظر خود را وارد کنید:",
+            "لطفاً موضوع مورد نظر خود را وارد کنید (حداکثر 100 کاراکتر):",
             reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت")]], resize_keyboard=True)
         )
         return TOPIC_INPUT
@@ -204,43 +266,65 @@ async def handle_topic_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if update.message.text == "🔙 بازگشت":
         return await start(update, context)
     
-    topic = update.message.text
-    service_type = context.user_data['selected_service']
-    user_id = update.effective_user.id
-    user = get_user(user_id)
-    
-    # بررسی تاریخچه برای جلوگیری از تکرار
-    history = get_user_service_history(user_id, service_type)
-    previous_results = [item[1] for item in history if item[0].lower() == topic.lower()]
-    
-    with open(f'{service_type}.json', encoding='utf-8') as f:
-        data = json.load(f)
-    
-    available_results = [v for k, v in data.items() if topic.lower() in k.lower()]
-    
-    # حذف نتایج تکراری
-    if previous_results:
-        available_results = [r for r in available_results if r not in previous_results]
-    
-    if not available_results:
-        await update.message.reply_text(
-            "نتیجه‌ای برای این موضوع یافت نشد یا تمام نتایج قبلاً نمایش داده شده‌اند.\n"
-            "لطفاً موضوع دیگری را امتحان کنید.",
-            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت")]], resize_keyboard=True)
-        )
+    topic = update.message.text.strip()
+    if len(topic) > 100:
+        await update.message.reply_text("موضوع وارد شده بسیار طولانی است! لطفاً حداکثر 100 کاراکتر وارد کنید.")
         return TOPIC_INPUT
     
-    selected_result = random.choice(available_results)
+    service_type = context.user_data['selected_service']
+    user_id = update.effective_user.id
+    user_balance = db.get_user_balance(user_id)
     
-    # ذخیره در تاریخچه
-    save_service_history(user_id, service_type, topic, selected_result)
+    if user_balance < PRICES[service_type]:
+        await update.message.reply_text(
+            f"موجودی شما برای این سرویس کافی نیست!\n"
+            f"قیمت سرویس: {PRICES[service_type]:,} تومان\n"
+            f"موجودی فعلی: {user_balance:,} تومان\n\n"
+            "لطفاً ابتدا کیف پول خود را شارژ کنید.",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("💰 شارژ کیف پول"), KeyboardButton("🔙 بازگشت")]], resize_keyboard=True)
+        )
+        return MAIN_MENU
     
-    await update.message.reply_text(
-        f"🔮 نتیجه {service_type} برای موضوع '{topic}':\n\n{selected_result}\n\n"
-        "برای استفاده مجدد /start را بزنید",
-        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
-    )
-    return MAIN_MENU
+    try:
+        with open(f'{service_type}.json', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        available_results = [v for k, v in data.items() if topic.lower() in k.lower()]
+        
+        if not available_results:
+            await update.message.reply_text(
+                "نتیجه‌ای برای این موضوع یافت نشد.\n"
+                "لطفاً موضوع دیگری را امتحان کنید.",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت")]], resize_keyboard=True)
+            )
+            return TOPIC_INPUT
+        
+        selected_result = random.choice(available_results)
+        
+        # کسر هزینه و ذخیره تاریخچه
+        success, _ = db.update_balance(user_id, -PRICES[service_type], f"service_{service_type}", True)
+        if success:
+            db.save_service_history(user_id, service_type, topic, selected_result)
+            await update.message.reply_text(
+                f"🔮 نتیجه {service_type} برای موضوع '{topic}':\n\n{selected_result}\n\n"
+                f"💰 مبلغ {PRICES[service_type]:,} تومان از حساب شما کسر شد.\n"
+                "برای استفاده مجدد /start را بزنید",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+            )
+        else:
+            await update.message.reply_text(
+                "خطا در پردازش درخواست! لطفاً مجدداً تلاش کنید.",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+            )
+        
+        return MAIN_MENU
+    except Exception as e:
+        logger.error(f"خطا در پردازش سرویس: {e}")
+        await update.message.reply_text(
+            "خطایی در سیستم رخ داده است! لطفاً بعداً تلاش کنید.",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+        )
+        return MAIN_MENU
 
 async def wallet_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -261,24 +345,21 @@ async def handle_charge_amount(update: Update, context: ContextTypes.DEFAULT_TYP
         return await start(update, context)
     
     if text == "مبلغ دلخواه":
-        await update.message.reply_text("لطفاً مبلغ مورد نظر را وارد کنید (تومان):")
+        await update.message.reply_text("لطفاً مبلغ مورد نظر را به تومان وارد کنید (حداقل 10,000 تومان):")
         return CHARGE_AMOUNT
     
-    try:
-        amount = int(text.replace(',', '').replace('،', '').replace(' ', '').replace('تومان', ''))
-        context.user_data['charge_amount'] = amount
-        
-        await update.message.reply_text(
-            f"برای شارژ {amount:,} تومان از طریق کارت به کارت:\n\n"
-            "شماره کارت: 6037-XXXX-XXXX-XXXX\n"
-            "به نام: [نام صاحب کارت]\n\n"
-            "پس از واریز، تصویر رسید را ارسال کنید.",
-            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت")]], resize_keyboard=True)
-        )
-        return CONFIRM_PAYMENT
-    except ValueError:
-        await update.message.reply_text("لطفاً یک مبلغ معتبر وارد کنید!")
+    is_valid, amount = PaymentManager.validate_amount(text)
+    if not is_valid or amount < 10000:
+        await update.message.reply_text("لطفاً یک مبلغ معتبر وارد کنید (حداقل 10,000 تومان)!")
         return CHARGE_AMOUNT
+    
+    context.user_data['charge_amount'] = amount
+    
+    await update.message.reply_text(
+        PaymentManager.generate_payment_receipt(amount),
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت")]], resize_keyboard=True)
+    )
+    return CONFIRM_PAYMENT
 
 async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text == "🔙 بازگشت":
@@ -289,42 +370,43 @@ async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYP
         amount = context.user_data.get('charge_amount', 10000)
         
         # ثبت تراکنش به صورت pending
-        with sqlite3.connect("bot.db") as conn:
-            cursor = conn.cursor()
-            ref_id = f"card_{random.randint(10000, 99999)}"
-            cursor.execute("""
-                INSERT INTO transactions 
-                (user_id, amount, type, status, ref_id, admin_approved)
-                VALUES (?, ?, 'charge', 'pending', ?, 0)
-            """, (user_id, amount, ref_id))
-            conn.commit()
+        ref_id = f"card_{random.randint(10000, 99999)}"
+        success, _ = db.update_balance(user_id, 0, "charge", False)
         
-        # ارسال به ادمین برای تایید
-        admin_text = (
-            f"📌 درخواست شارژ جدید\n\n"
-            f"👤 کاربر: {update.effective_user.full_name} (آیدی: {user_id})\n"
-            f"💰 مبلغ: {amount:,} تومان\n"
-            f"🆔 کد پیگیری: {ref_id}"
-        )
+        if success:
+            # ارسال به ادمین برای تایید
+            admin_text = (
+                f"📌 درخواست شارژ جدید\n\n"
+                f"👤 کاربر: {update.effective_user.full_name} (آیدی: {user_id})\n"
+                f"💰 مبلغ: {amount:,} تومان\n"
+                f"🆔 کد پیگیری: {ref_id}"
+            )
+            
+            keyboard = [
+                [InlineKeyboardButton("✅ تایید پرداخت", callback_data=f"approve_{ref_id}")],
+                [InlineKeyboardButton("❌ رد پرداخت", callback_data=f"reject_{ref_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await context.bot.send_photo(
+                chat_id=ADMIN_ID,
+                photo=update.message.photo[-1].file_id,
+                caption=admin_text,
+                reply_markup=reply_markup
+            )
+            
+            await update.message.reply_text(
+                "✅ رسید پرداخت دریافت شد و برای تایید به ادمین ارسال شد.\n"
+                "پس از تایید ادمین، موجودی به کیف پول شما اضافه خواهد شد.\n\n"
+                f"🆔 کد پیگیری: {ref_id}",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+            )
+        else:
+            await update.message.reply_text(
+                "خطا در ثبت درخواست پرداخت! لطفاً مجدداً تلاش کنید.",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+            )
         
-        keyboard = [
-            [InlineKeyboardButton("✅ تایید پرداخت", callback_data=f"approve_{ref_id}")],
-            [InlineKeyboardButton("❌ رد پرداخت", callback_data=f"reject_{ref_id}")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await context.bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=update.message.photo[-1].file_id,
-            caption=admin_text,
-            reply_markup=reply_markup
-        )
-        
-        await update.message.reply_text(
-            "✅ رسید پرداخت دریافت شد و برای تایید به ادمین ارسال شد.\n"
-            "پس از تایید ادمین، موجودی به کیف پول شما اضافه خواهد شد.",
-            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
-        )
         return MAIN_MENU
     else:
         await update.message.reply_text("لطفاً تصویر رسید پرداخت را ارسال کنید.")
@@ -340,53 +422,16 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
     
     action, ref_id = query.data.split('_', 1)
     
-    with sqlite3.connect("bot.db") as conn:
-        cursor = conn.cursor()
-        
-        # دریافت اطلاعات تراکنش
-        cursor.execute("""
-            SELECT user_id, amount 
-            FROM transactions 
-            WHERE ref_id = ? AND status = 'pending'
-        """, (ref_id,))
-        transaction = cursor.fetchone()
-        
-        if not transaction:
-            await query.edit_message_text("تراکنش یافت نشد یا قبلاً پردازش شده!")
-            return
-            
-        user_id, amount = transaction
-        
+    try:
         if action == "approve":
-            try:
-                # شروع تراکنش دیتابیس
-                cursor.execute("BEGIN TRANSACTION")
-                
-                # اطمینان از وجود کاربر
-                cursor.execute("""
-                    INSERT OR IGNORE INTO users (user_id, balance) 
-                    VALUES (?, 0)
-                """, (user_id,))
-                
-                # افزایش موجودی کاربر
-                cursor.execute("""
-                    UPDATE users 
-                    SET balance = balance + ? 
-                    WHERE user_id = ?
-                """, (amount, user_id))
-                
-                # تایید تراکنش
-                cursor.execute("""
-                    UPDATE transactions 
-                    SET status = 'completed', admin_approved = 1 
-                    WHERE ref_id = ? AND status = 'pending'
-                """, (ref_id,))
-                
-                # تأیید تغییرات
-                conn.commit()
-                
-                # اطلاع به کاربر
-                new_balance = get_user_balance(user_id)
+            # تایید پرداخت
+            user_id = int(ref_id.split('_')[1])
+            amount = int(ref_id.split('_')[2])
+            
+            success, _ = db.update_balance(user_id, amount, "charge", True)
+            
+            if success:
+                new_balance = db.get_user_balance(user_id)
                 try:
                     await context.bot.send_message(
                         chat_id=user_id,
@@ -395,47 +440,33 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                              f"💳 موجودی جدید: {new_balance:,} تومان"
                     )
                 except Exception as e:
-                    print(f"خطا در ارسال پیام به کاربر: {e}")
+                    logger.error(f"خطا در ارسال پیام به کاربر: {e}")
                 
-                # ویرایش پیام اصلی
                 await query.edit_message_caption(
                     caption=f"✅ تراکنش {ref_id} تایید شد.\n\n"
                            f"مبلغ {amount:,} تومان به حساب کاربر اضافه شد.\n"
                            f"موجودی جدید کاربر: {new_balance:,} تومان",
                     reply_markup=None
                 )
-                
-            except Exception as e:
-                conn.rollback()
-                print(f"خطا در پردازش تراکنش: {e}")
+            else:
                 await query.edit_message_caption(
-                    caption=f"❌ خطا در پردازش تراکنش: {str(e)}",
+                    caption=f"❌ خطا در تایید تراکنش {ref_id}",
                     reply_markup=None
                 )
                 
         elif action == "reject":
-            # رد تراکنش
-            cursor.execute("""
-                UPDATE transactions 
-                SET status = 'rejected', admin_approved = 0 
-                WHERE ref_id = ? AND status = 'pending'
-            """, (ref_id,))
-            conn.commit()
-            
-            # اطلاع به کاربر
-            try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text="❌ درخواست شارژ شما توسط ادمین رد شد.\n\nلطفاً با پشتیبانی تماس بگیرید."
-                )
-            except Exception as e:
-                print(f"خطا در ارسال پیام به کاربر: {e}")
-            
-            # ویرایش پیام اصلی
+            # رد پرداخت
             await query.edit_message_caption(
                 caption=f"❌ تراکنش {ref_id} رد شد.",
                 reply_markup=None
             )
+            
+    except Exception as e:
+        logger.error(f"خطا در پردازش درخواست ادمین: {e}")
+        await query.edit_message_caption(
+            caption=f"❌ خطا در پردازش درخواست: {str(e)}",
+            reply_markup=None
+        )
 
 async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -457,35 +488,49 @@ async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
         return await start(update, context)
     
     plan_map = {
-        "۱ ماهه - ۳۰,۰۰۰ تومان": ("monthly", 30000),
-        "۳ ماهه - ۸۰,۰۰۰ تومان": ("3months", 80000),
-        "۶ ماهه - ۱۵۰,۰۰۰ تومان": ("6months", 150000),
-        "۱ ساله - ۲۵۰,۰۰۰ تومان": ("yearly", 250000)
+        "۱ ماهه - ۳۰,۰۰۰ تومان": "monthly",
+        "۳ ماهه - ۸۰,۰۰۰ تومان": "3months",
+        "۶ ماهه - ۱۵۰,۰۰۰ تومان": "6months",
+        "۱ ساله - ۲۵۰,۰۰۰ تومان": "yearly"
     }
     
     if text in plan_map:
-        plan, price = plan_map[text]
+        plan = plan_map[text]
         user_id = update.effective_user.id
-        user = get_user(user_id)
+        user_balance = db.get_user_balance(user_id)
+        price = SUBSCRIPTIONS[plan]["price"]
         
-        if user and user[1] >= price:
-            expiry_date = (datetime.now() + timedelta(days=SUBSCRIPTIONS[plan]["days"])).strftime("%Y-%m-%d")
-            
-            with sqlite3.connect("bot.db") as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    UPDATE users 
-                    SET balance = balance - ?, subscription_expiry = ?
-                    WHERE user_id = ?
-                """, (price, expiry_date, user_id))
-                
-                cursor.execute("""
-                    INSERT INTO transactions 
-                    (user_id, amount, type, status, admin_approved)
-                    VALUES (?, ?, 'subscription', 'completed', 1)
-                """, (user_id, price))
-                conn.commit()
-            
+        if user_balance >= price:
+            # تأیید نهایی از کاربر
+            keyboard = [
+                [KeyboardButton(f"✅ بله، اشتراک {plan} را فعال کن")],
+                [KeyboardButton("❌ خیر، انصراف")]
+            ]
+            context.user_data['selected_plan'] = plan
+            await update.message.reply_text(
+                f"آیا مایلید اشتراک {plan} به مبلغ {price:,} تومان از حساب شما کسر شود؟\n\n"
+                f"💰 موجودی فعلی: {user_balance:,} تومان\n"
+                f"💰 مبلغ اشتراک: {price:,} تومان\n"
+                f"💰 موجودی پس از کسر: {user_balance - price:,} تومان",
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
+            return SUBSCRIPTION_MENU
+        else:
+            await update.message.reply_text(
+                "موجودی کیف پول شما برای این اشتراک کافی نیست!\n"
+                "لطفاً ابتدا کیف پول خود را شارژ کنید.",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("💰 شارژ کیف پول"), KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+            )
+            return MAIN_MENU
+    elif text.startswith("✅ بله"):
+        plan = context.user_data.get('selected_plan')
+        if not plan:
+            return await start(update, context)
+        
+        user_id = update.effective_user.id
+        success, expiry_date = db.update_subscription(user_id, plan)
+        
+        if success:
             await update.message.reply_text(
                 f"✅ اشتراک {plan} با موفقیت فعال شد!\n"
                 f"تاریخ انقضا: {expiry_date}\n\n"
@@ -493,14 +538,18 @@ async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         else:
             await update.message.reply_text(
-                "موجودی کیف پول شما برای این اشتراک کافی نیست!\n"
-                "لطفاً ابتدا کیف پول خود را شارژ کنید."
+                "خطا در فعال‌سازی اشتراک! لطفاً بعداً تلاش کنید.",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
             )
+        return MAIN_MENU
+    elif text.startswith("❌ خیر"):
+        return await start(update, context)
+    
     return MAIN_MENU
 
 async def show_payment_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    transactions = get_transaction_history(user_id)
+    transactions = db.get_transaction_history(user_id)
     
     if not transactions:
         await update.message.reply_text(
@@ -510,13 +559,16 @@ async def show_payment_history(update: Update, context: ContextTypes.DEFAULT_TYP
         return MAIN_MENU
     
     history_text = "📋 تاریخچه پرداخت‌های شما:\n\n"
-    for i, (t_type, amount, status, date) in enumerate(transactions[:10], 1):
+    for i, (t_type, amount, status, date) in enumerate(transactions, 1):
         history_text += (
             f"{i}. نوع: {t_type}\n"
             f"💰 مبلغ: {amount:,} تومان\n"
             f"🔄 وضعیت: {status}\n"
             f"📅 تاریخ: {date}\n\n"
         )
+    
+    if len(transactions) == 10:
+        history_text += "برای مشاهده تراکنش‌های بیشتر، بعداً مجدداً تلاش کنید."
     
     await update.message.reply_text(
         history_text,
@@ -526,7 +578,7 @@ async def show_payment_history(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def show_service_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    history = get_user_service_history(user_id)
+    history = db.get_user_service_history(user_id)
     
     if not history:
         await update.message.reply_text(
@@ -536,12 +588,15 @@ async def show_service_history(update: Update, context: ContextTypes.DEFAULT_TYP
         return MAIN_MENU
     
     history_text = "📜 تاریخچه خدمات شما:\n\n"
-    for i, (s_type, topic, result, date) in enumerate(history[:10], 1):
+    for i, (s_type, topic, result, date) in enumerate(history, 1):
         history_text += (
             f"{i}. نوع: {s_type}\n"
             f"📌 موضوع: {topic}\n"
             f"📅 تاریخ: {date}\n\n"
         )
+    
+    if len(history) == 10:
+        history_text += "برای مشاهده سرویس‌های بیشتر، بعداً مجدداً تلاش کنید."
     
     await update.message.reply_text(
         history_text,
@@ -549,16 +604,10 @@ async def show_service_history(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     return MAIN_MENU
 
-# --- تنظیم و اجرای ربات ---
+# --- اجرای ربات ---
 def main():
-    """تابع اصلی اجرای ربات"""
-    # مقداردهی اولیه دیتابیس
-    init_db()
-    
-    # ساخت برنامه ربات
     app = Application.builder().token(TOKEN).build()
     
-    # مدیریت مکالمات
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
@@ -590,10 +639,9 @@ def main():
     )
     
     app.add_handler(conv_handler)
-    
-    # اضافه کردن هندلر برای دکمه‌های اینلاین
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^(approve|reject)_"))
     
+    logger.info("ربات در حال اجرا است...")
     app.run_polling()
 
 if __name__ == "__main__":

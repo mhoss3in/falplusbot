@@ -1,10 +1,12 @@
-import telebot
-from telebot import types
-import json
 import os
+from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update
 
-TOKEN = os.environ.get("BOT_TOKEN")  # با نام متغیر درست در Render
-bot = telebot.TeleBot(TOKEN)
+# گرفتن توکن از محیط
+TOKEN = os.environ.get("BOT_TOKEN")
+
+if not TOKEN:
+    raise ValueError("BOT_TOKEN is missing!")
 
 # بارگذاری فایل‌های json
 with open("estekhare.json", "r", encoding="utf-8") as f:

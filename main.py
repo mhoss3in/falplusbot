@@ -22,7 +22,7 @@ from telegram.ext import (
 
 # --- تنظیمات پایه ---
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # دریافت از متغیر محیطی
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 if not TOKEN:
     raise ValueError("توکن ربات تنظیم نشده است!")
 if ADMIN_ID == 0:
@@ -44,13 +44,15 @@ SUBSCRIPTIONS = {
 
 # --- وضعیت‌های مکالمه ---
 (MAIN_MENU, SERVICE_SELECTION, 
- CHARGE_AMOUNT, SUBSCRIPTION_MENU,
- CONFIRM_PAYMENT) = range(5)
+ TOPIC_INPUT, CHARGE_AMOUNT, 
+ SUBSCRIPTION_MENU, CONFIRM_PAYMENT,
+ PAYMENT_HISTORY) = range(7)
 
 # --- توابع دیتابیس ---
 def init_db():
     with sqlite3.connect("bot.db") as conn:
         cursor = conn.cursor()
+        # جدول کاربران
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -58,6 +60,7 @@ def init_db():
                 subscription_expiry TEXT
             )
         """)
+        # جدول تراکنش‌ها
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,6 +71,18 @@ def init_db():
                 date TEXT DEFAULT CURRENT_TIMESTAMP,
                 ref_id TEXT,
                 admin_approved BOOLEAN DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+        """)
+        # جدول تاریخچه خدمات
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS service_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                service_type TEXT,
+                topic TEXT,
+                result TEXT,
+                date TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
@@ -106,6 +121,46 @@ def update_balance(user_id, amount, transaction_type="charge", approved=False):
         print(f"خطا در به‌روزرسانی موجودی: {e}")
         return False, None
 
+def save_service_history(user_id, service_type, topic, result):
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO service_history 
+            (user_id, service_type, topic, result)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, service_type, topic, result))
+        conn.commit()
+
+def get_user_service_history(user_id, service_type=None):
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        if service_type:
+            cursor.execute("""
+                SELECT topic, result, date 
+                FROM service_history 
+                WHERE user_id = ? AND service_type = ?
+                ORDER BY date DESC
+            """, (user_id, service_type))
+        else:
+            cursor.execute("""
+                SELECT service_type, topic, result, date 
+                FROM service_history 
+                WHERE user_id = ?
+                ORDER BY date DESC
+            """, (user_id,))
+        return cursor.fetchall()
+
+def get_transaction_history(user_id):
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT type, amount, status, date 
+            FROM transactions 
+            WHERE user_id = ?
+            ORDER BY date DESC
+        """, (user_id,))
+        return cursor.fetchall()
+
 # --- توابع اصلی ربات ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update.effective_user.id)
@@ -116,7 +171,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("📿 استخاره"), KeyboardButton("📜 دعای گشایش")],
         [KeyboardButton("📖 فال حافظ")],
         [KeyboardButton("💰 شارژ کیف پول"), KeyboardButton("🔔 اشتراک")],
-        [KeyboardButton("📋 تاریخچه پرداخت‌ها")]
+        [KeyboardButton("📋 تاریخچه پرداخت‌ها"), KeyboardButton("📜 تاریخچه خدمات")]
     ]
     
     await update.message.reply_text(
@@ -125,6 +180,65 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 موجودی: {balance:,} تومان\n"
         f"🔔 وضعیت اشتراک: {sub_expiry}",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return MAIN_MENU
+
+async def handle_service_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    service_map = {
+        "📿 استخاره": "estekhare",
+        "📜 دعای گشایش": "gooshayesh",
+        "📖 فال حافظ": "hafez"
+    }
+    
+    if update.message.text in service_map:
+        context.user_data['selected_service'] = service_map[update.message.text]
+        await update.message.reply_text(
+            "لطفاً موضوع مورد نظر خود را وارد کنید:",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت")]], resize_keyboard=True)
+        )
+        return TOPIC_INPUT
+    
+    return MAIN_MENU
+
+async def handle_topic_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "🔙 بازگشت":
+        return await start(update, context)
+    
+    topic = update.message.text
+    service_type = context.user_data['selected_service']
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    
+    # بررسی تاریخچه برای جلوگیری از تکرار
+    history = get_user_service_history(user_id, service_type)
+    previous_results = [item[1] for item in history if item[0].lower() == topic.lower()]
+    
+    with open(f'{service_type}.json', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    available_results = [v for k, v in data.items() if topic.lower() in k.lower()]
+    
+    # حذف نتایج تکراری
+    if previous_results:
+        available_results = [r for r in available_results if r not in previous_results]
+    
+    if not available_results:
+        await update.message.reply_text(
+            "نتیجه‌ای برای این موضوع یافت نشد یا تمام نتایج قبلاً نمایش داده شده‌اند.\n"
+            "لطفاً موضوع دیگری را امتحان کنید.",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت")]], resize_keyboard=True)
+        )
+        return TOPIC_INPUT
+    
+    selected_result = random.choice(available_results)
+    
+    # ذخیره در تاریخچه
+    save_service_history(user_id, service_type, topic, selected_result)
+    
+    await update.message.reply_text(
+        f"🔮 نتیجه {service_type} برای موضوع '{topic}':\n\n{selected_result}\n\n"
+        "برای استفاده مجدد /start را بزنید",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
     )
     return MAIN_MENU
 
@@ -268,10 +382,6 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     WHERE ref_id = ? AND status = 'pending'
                 """, (ref_id,))
                 
-                # بررسی تعداد ردیف‌های تأثیرپذیرفته
-                if cursor.rowcount == 0:
-                    raise Exception("هیچ رکورد کاربری به‌روزرسانی نشد")
-                
                 # تأیید تغییرات
                 conn.commit()
                 
@@ -326,41 +436,6 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 caption=f"❌ تراکنش {ref_id} رد شد.",
                 reply_markup=None
             )
-
-# --- سایر توابع ---
-async def handle_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    service_map = {
-        "📿 استخاره": ("estekhare", PRICES["estekhare"]),
-        "📜 دعای گشایش": ("gooshayesh", PRICES["gooshayesh"]),
-        "📖 فال حافظ": ("hafez", PRICES["hafez"])
-    }
-    
-    if update.message.text in service_map:
-        service, price = service_map[update.message.text]
-        user_id = update.effective_user.id
-        user = get_user(user_id)
-        
-        if user and user[2] and datetime.strptime(user[2], "%Y-%m-%d") > datetime.now():
-            await deliver_service(update, service)
-        elif user and user[1] >= price:
-            update_balance(user_id, -price, "payment", True)
-            await deliver_service(update, service)
-        else:
-            await update.message.reply_text(
-                f"موجودی کافی نیست! قیمت سرویس: {price:,} تومان\n"
-                "لطفاً از بخش کیف پول اقدام به شارژ کنید."
-            )
-    return MAIN_MENU
-
-async def deliver_service(update: Update, service: str):
-    with open(f'{service}.json', encoding='utf-8') as f:
-        data = json.load(f)
-    result = random.choice(list(data.values()))
-    
-    await update.message.reply_text(
-        f"🔮 نتیجه {service}:\n\n{result}\n\n"
-        "برای استفاده مجدد /start را بزنید"
-    )
 
 async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -423,6 +498,57 @@ async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
     return MAIN_MENU
 
+async def show_payment_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    transactions = get_transaction_history(user_id)
+    
+    if not transactions:
+        await update.message.reply_text(
+            "تاریخچه پرداخت‌های شما خالی است.",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+        )
+        return MAIN_MENU
+    
+    history_text = "📋 تاریخچه پرداخت‌های شما:\n\n"
+    for i, (t_type, amount, status, date) in enumerate(transactions[:10], 1):
+        history_text += (
+            f"{i}. نوع: {t_type}\n"
+            f"💰 مبلغ: {amount:,} تومان\n"
+            f"🔄 وضعیت: {status}\n"
+            f"📅 تاریخ: {date}\n\n"
+        )
+    
+    await update.message.reply_text(
+        history_text,
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+    )
+    return MAIN_MENU
+
+async def show_service_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    history = get_user_service_history(user_id)
+    
+    if not history:
+        await update.message.reply_text(
+            "تاریخچه خدمات شما خالی است.",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+        )
+        return MAIN_MENU
+    
+    history_text = "📜 تاریخچه خدمات شما:\n\n"
+    for i, (s_type, topic, result, date) in enumerate(history[:10], 1):
+        history_text += (
+            f"{i}. نوع: {s_type}\n"
+            f"📌 موضوع: {topic}\n"
+            f"📅 تاریخ: {date}\n\n"
+        )
+    
+    await update.message.reply_text(
+        history_text,
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+    )
+    return MAIN_MENU
+
 # --- تنظیم و اجرای ربات ---
 def main():
     """تابع اصلی اجرای ربات"""
@@ -437,10 +563,15 @@ def main():
         entry_points=[CommandHandler('start', start)],
         states={
             MAIN_MENU: [
-                MessageHandler(filters.Regex("^(📿 استخاره|📜 دعای گشایش|📖 فال حافظ)$"), handle_service),
+                MessageHandler(filters.Regex("^(📿 استخاره|📜 دعای گشایش|📖 فال حافظ)$"), handle_service_selection),
                 MessageHandler(filters.Regex("^💰 شارژ کیف پول$"), wallet_charge),
                 MessageHandler(filters.Regex("^🔔 اشتراک$"), subscription_menu),
-                MessageHandler(filters.Regex("^📋 تاریخچه پرداخت‌ها$"), lambda u,c: start(u,c)),
+                MessageHandler(filters.Regex("^📋 تاریخچه پرداخت‌ها$"), show_payment_history),
+                MessageHandler(filters.Regex("^📜 تاریخچه خدمات$"), show_service_history),
+                MessageHandler(filters.Regex("^🔙 بازگشت"), start)
+            ],
+            TOPIC_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_topic_input),
                 MessageHandler(filters.Regex("^🔙 بازگشت"), start)
             ],
             CHARGE_AMOUNT: [

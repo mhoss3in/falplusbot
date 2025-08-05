@@ -1,51 +1,21 @@
-import json
 import os
-from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update
 
-# بارگذاری فایل‌های JSON
-with open("estekhare.json", "r", encoding="utf-8") as f:
-    estekhare = json.load(f)
+# گرفتن توکن از متغیر محیطی
+TOKEN = os.environ.get("BOT_TOKEN")
 
-with open("gooshayesh.json", "r", encoding="utf-8") as f:
-    gooshayesh = json.load(f)
+# اگر توکن موجود نبود، خطا بده
+if not TOKEN:
+    raise ValueError("توکن بات تلگرام پیدا نشد! لطفاً متغیر محیطی BOT_TOKEN را در Render تنظیم کن.")
 
-with open("hafez.json", "r", encoding="utf-8") as f:
-    hafez = json.load(f)
-
-# هندلر فرمان /start
+# دستور /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("سلام! خوش اومدی 🌟\n/estekhare\n/gooshayesh\n/fal")
+    await update.message.reply_text("سلام! ربات شما با موفقیت فعال است.")
 
-# هندلر فرمان /estekhare
-async def estekhare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    topic = "ازدواج"
-    reply = estekhare.get(topic, "چیزی پیدا نشد.")
-    await update.message.reply_text(reply)
-
-# هندلر فرمان /gooshayesh
-async def gooshayesh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    topic = "رزق"
-    reply = gooshayesh.get(topic, "چیزی پیدا نشد.")
-    await update.message.reply_text(reply)
-
-# هندلر فرمان /fal
-async def fal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    topic = "عشق"
-    reply = hafez.get(topic, "چیزی پیدا نشد.")
-    await update.message.reply_text(reply)
-
-# تابع اصلی اجرا
 def main():
-    TOKEN = os.environ.get("BOT_TOKEN")
     app = Application.builder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("estekhare", estekhare_command))
-    app.add_handler(CommandHandler("gooshayesh", gooshayesh_command))
-    app.add_handler(CommandHandler("fal", fal_command))
-
-    print("ربات در حال اجراست...")
     app.run_polling()
 
 if __name__ == "__main__":

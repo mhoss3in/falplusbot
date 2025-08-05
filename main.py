@@ -13,7 +13,7 @@ from telegram.ext import (
     filters
 )
 
-# تنظیمات پایه
+# --- تنظیمات پایه ---
 TOKEN = os.environ.get("BOT_TOKEN")
 MERCHANT_KEY = "zibal_merchant_key"  # جایگزین با کلید واقعی
 ADMIN_CARD = "6037-XXXX-XXXX-XXXX"  # شماره کارت برای پرداخت کارت به کارت
@@ -21,27 +21,26 @@ ADMIN_CARD = "6037-XXXX-XXXX-XXXX"  # شماره کارت برای پرداخت 
 if not TOKEN:
     raise ValueError("توکن ربات تنظیم نشده است!")
 
-# تعرفه خدمات
+# --- تعرفه‌ها و پلن‌ها ---
 PRICES = {
     "estekhare": 5000,
     "gooshayesh": 7000,
     "hafez": 10000
 }
 
-# پلن‌های اشتراک
 SUBSCRIPTIONS = {
     "monthly": {"price": 30000, "days": 30},
     "yearly": {"price": 250000, "days": 365}
 }
 
-# وضعیت‌های مکالمه
+# --- وضعیت‌های مکالمه ---
 (MAIN_MENU, SERVICE_SELECTION, 
  PAYMENT_METHOD, CHARGE_AMOUNT,
  SUBSCRIPTION_MENU, CONFIRM_PAYMENT) = range(6)
 
 # --- توابع دیتابیس ---
 def init_db():
-    """ایجاد ساختار دیتابیس"""
+    """تابع ایجاد ساختار دیتابیس"""
     with sqlite3.connect("bot.db") as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -65,7 +64,7 @@ def init_db():
         """)
 
 def get_user(user_id):
-    """دریافت اطلاعات کاربر"""
+    """دریافت اطلاعات کاربر از دیتابیس"""
     with sqlite3.connect("bot.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
@@ -85,7 +84,7 @@ def update_balance(user_id, amount):
 
 # --- توابع اصلی ربات ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """منوی اصلی"""
+    """منوی اصلی ربات"""
     user = get_user(update.effective_user.id)
     balance = user[1] if user else 0
     sub_expiry = user[2] if user and user[2] else "غیرفعال"
@@ -119,14 +118,11 @@ async def handle_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = get_user(user_id)
         
         if user and user[2] and datetime.strptime(user[2], "%Y-%m-%d") > datetime.now():
-            # کاربر اشتراک فعال دارد
             await deliver_service(update, service)
         elif user and user[1] >= price:
-            # پرداخت از کیف پول
             update_balance(user_id, -price)
             await deliver_service(update, service)
         else:
-            # موجودی کافی نیست
             await update.message.reply_text(
                 f"موجودی کافی نیست! قیمت سرویس: {price:,} تومان\n"
                 "لطفا از بخش کیف پول اقدام به شارژ کنید."
@@ -134,7 +130,7 @@ async def handle_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 async def deliver_service(update: Update, service: str):
-    """ارسال نتیجه سرویس"""
+    """ارسال نتیجه سرویس به کاربر"""
     with open(f'{service}.json', encoding='utf-8') as f:
         data = json.load(f)
     result = random.choice(list(data.values()))
@@ -144,9 +140,8 @@ async def deliver_service(update: Update, service: str):
         "برای استفاده مجدد /start را بزنید"
     )
 
-# --- سیستم پرداخت و اشتراک ---
 async def wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """منوی کیف پول"""
+    """منوی مدیریت کیف پول"""
     keyboard = [
         [KeyboardButton("💳 درگاه پرداخت"), KeyboardButton("📲 کارت به کارت")],
         [KeyboardButton("🔙 بازگشت")]
@@ -158,7 +153,7 @@ async def wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return PAYMENT_METHOD
 
 async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش پرداخت"""
+    """پردازش انتخاب روش پرداخت"""
     if update.message.text == "💳 درگاه پرداخت":
         await update.message.reply_text("مبلغ مورد نظر را وارد کنید (تومان):")
         return CHARGE_AMOUNT
@@ -173,14 +168,13 @@ async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return MAIN_MENU
 
 async def process_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش درخواست شارژ"""
+    """پردازش درخواست شارژ کیف پول"""
     try:
         amount = int(update.message.text)
         if amount < 10000:
             await update.message.reply_text("حداقل مبلغ شارژ ۱۰,۰۰۰ تومان است.")
             return CHARGE_AMOUNT
         
-        # شبیه‌سازی درگاه پرداخت
         ref_id = f"zibal_{random.randint(10000, 99999)}"
         update_balance(update.effective_user.id, amount)
         
@@ -192,6 +186,7 @@ async def process_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("لطفا فقط عدد وارد کنید!")
         return CHARGE_AMOUNT
+
 async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """منوی مدیریت اشتراک"""
     keyboard = [
@@ -218,10 +213,8 @@ async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
         user = get_user(user_id)
         
         if user and user[1] >= price:
-            # محاسبه تاریخ انقضا
             expiry_date = (datetime.now() + timedelta(days=SUBSCRIPTIONS[plan]["days"])).strftime("%Y-%m-%d")
             
-            # بروزرسانی اطلاعات کاربر
             with sqlite3.connect("bot.db") as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -230,7 +223,6 @@ async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
                     WHERE user_id = ?
                 """, (price, expiry_date, user_id))
                 
-                # ثبت تراکنش
                 cursor.execute("""
                     INSERT INTO transactions 
                     (user_id, amount, type, status)
@@ -255,19 +247,14 @@ async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             "رسید پرداخت دریافت شد و در حال بررسی است.\n"
             "پس از تایید، موجودی به کیف پول شما اضافه خواهد شد."
         )
-        # در اینجا می‌توانید سیستم تایید دستی/خودکار را پیاده‌سازی کنید
     return MAIN_MENU
-# --- اجرای ربات ---
+
 def main():
-    # مقداردهی اولیه دیتابیس
-    def main():
-    # مقداردهی اولیه دیتابیس
+    """تابع اصلی اجرای ربات"""
     init_db()
     
-    # تنظیمات ربات
     app = Application.builder().token(TOKEN).build()
     
-    # مدیریت مکالمات
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
@@ -294,6 +281,6 @@ def main():
     
     app.add_handler(conv_handler)
     app.run_polling()
-    
+
 if __name__ == "__main__":
     main()

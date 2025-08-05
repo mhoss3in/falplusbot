@@ -15,9 +15,6 @@ from telegram.ext import (
 
 # --- تنظیمات پایه ---
 TOKEN = os.environ.get("BOT_TOKEN")
-MERCHANT_KEY = "zibal_merchant_key"
-ADMIN_CARD = "6037-XXXX-XXXX-XXXX"
-
 if not TOKEN:
     raise ValueError("توکن ربات تنظیم نشده است!")
 
@@ -42,6 +39,7 @@ SUBSCRIPTIONS = {
 
 # --- توابع دیتابیس ---
 def init_db():
+    """ایجاد و تنظیم ساختار دیتابیس"""
     with sqlite3.connect("bot.db") as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -63,26 +61,40 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
+        conn.commit()
 
 def get_user(user_id):
+    """دریافت اطلاعات کاربر از دیتابیس"""
     with sqlite3.connect("bot.db") as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         return cursor.fetchone()
 
 def update_balance(user_id, amount):
-    with sqlite3.connect("bot.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)
-        """, (user_id,))
-        cursor.execute("""
-            UPDATE users SET balance = balance + ? WHERE user_id = ?
-        """, (amount, user_id))
-        conn.commit()
+    """به‌روزرسانی موجودی کاربر با مدیریت تراکنش"""
+    try:
+        with sqlite3.connect("bot.db") as conn:
+            cursor = conn.cursor()
+            # ایجاد کاربر اگر وجود نداشته باشد
+            cursor.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (user_id,))
+            # به‌روزرسانی موجودی
+            cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+            # ثبت تراکنش
+            ref_id = f"charge_{random.randint(10000, 99999)}"
+            cursor.execute("""
+                INSERT INTO transactions 
+                (user_id, amount, type, status, ref_id)
+                VALUES (?, ?, 'charge', 'completed', ?)
+            """, (user_id, amount, ref_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"خطا در به‌روزرسانی موجودی: {e}")
+        return False
 
 # --- توابع اصلی ربات ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """منوی اصلی ربات"""
     user = get_user(update.effective_user.id)
     balance = user[1] if user else 0
     sub_expiry = user[2] if user and user[2] else "غیرفعال"
@@ -102,7 +114,115 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return MAIN_MENU
 
+async def wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """منوی مدیریت کیف پول"""
+    user = get_user(update.effective_user.id)
+    balance = user[1] if user else 0
+    
+    keyboard = [
+        [KeyboardButton("💳 شارژ با درگاه پرداخت")],
+        [KeyboardButton("📲 شارژ با کارت به کارت")],
+        [KeyboardButton("🔙 بازگشت به منوی اصلی")]
+    ]
+    
+    await update.message.reply_text(
+        f"💼 کیف پول شما\n\n"
+        f"💰 موجودی فعلی: {balance:,} تومان\n\n"
+        "لطفاً روش شارژ را انتخاب کنید:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return PAYMENT_METHOD
+
+async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش انتخاب روش پرداخت"""
+    text = update.message.text
+    
+    if text == "💳 شارژ با درگاه پرداخت":
+        await update.message.reply_text(
+            "لطفاً مبلغ مورد نظر برای شارژ را وارد کنید (تومان):\n\n"
+            "مثال: 50000 یا 50,000"
+        )
+        return CHARGE_AMOUNT
+    elif text == "📲 شارژ با کارت به کارت":
+        await update.message.reply_text(
+            "برای شارژ کیف پول از طریق کارت به کارت:\n\n"
+            "شماره کارت: 6037-XXXX-XXXX-XXXX\n"
+            "به نام: [نام صاحب کارت]\n\n"
+            "پس از واریز، تصویر رسید را ارسال کنید."
+        )
+        return CONFIRM_PAYMENT
+    elif text == "🔙 بازگشت به منوی اصلی":
+        return await start(update, context)
+    
+    return PAYMENT_METHOD
+
+async def process_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش شارژ کیف پول"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if text == "🔙 بازگشت":
+        return await wallet_menu(update, context)
+    
+    try:
+        # پردازش مبلغ ورودی
+        amount = int(text.replace(',', '').replace('،', '').replace(' ', ''))
+        
+        if amount < 10000:
+            await update.message.reply_text("حداقل مبلغ شارژ ۱۰,۰۰۰ تومان است.")
+            return CHARGE_AMOUNT
+        
+        # انجام عملیات شارژ
+        if update_balance(user_id, amount):
+            user = get_user(user_id)
+            await update.message.reply_text(
+                f"✅ موجودی شما با موفقیت {amount:,} تومان شارژ شد!\n"
+                f"💰 موجودی جدید: {user[1]:,} تومان\n\n"
+                "برای بازگشت به منوی اصلی /start را بزنید."
+            )
+            return MAIN_MENU
+        else:
+            await update.message.reply_text(
+                "⚠️ خطا در پردازش درخواست شارژ!\n"
+                "لطفاً مجدداً تلاش کنید."
+            )
+            return CHARGE_AMOUNT
+            
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ لطفاً فقط عدد وارد کنید!\n"
+            "مثال:\n50000\nیا\n50,000"
+        )
+        return CHARGE_AMOUNT
+
+async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تایید پرداخت کارت به کارت"""
+    if update.message.photo:
+        # در اینجا می‌توانید سیستم تایید دستی/خودکار را پیاده‌سازی کنید
+        amount = 10000  # مقدار پیش‌فرض یا از کاربر دریافت شود
+        user_id = update.effective_user.id
+        
+        if update_balance(user_id, amount):
+            await update.message.reply_text(
+                f"✅ پرداخت شما تأیید و مبلغ {amount:,} تومان به کیف پول شما اضافه شد!\n"
+                "برای بازگشت به منوی اصلی /start را بزنید."
+            )
+        else:
+            await update.message.reply_text(
+                "⚠️ خطا در ثبت پرداخت!\n"
+                "لطفاً با پشتیبانی تماس بگیرید."
+            )
+    else:
+        await update.message.reply_text(
+            "لطفاً تصویر رسید پرداخت را ارسال کنید."
+        )
+        return CONFIRM_PAYMENT
+    
+    return MAIN_MENU
+
+# --- سایر توابع (سرویس‌ها و اشتراک) ---
 async def handle_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش درخواست خدمات"""
     service_map = {
         "📿 استخاره": ("estekhare", PRICES["estekhare"]),
         "📜 دعای گشایش": ("gooshayesh", PRICES["gooshayesh"]),
@@ -122,11 +242,12 @@ async def handle_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(
                 f"موجودی کافی نیست! قیمت سرویس: {price:,} تومان\n"
-                "لطفا از بخش کیف پول اقدام به شارژ کنید."
+                "لطفاً از بخش کیف پول اقدام به شارژ کنید."
             )
     return MAIN_MENU
 
 async def deliver_service(update: Update, service: str):
+    """ارسال نتیجه سرویس"""
     with open(f'{service}.json', encoding='utf-8') as f:
         data = json.load(f)
     result = random.choice(list(data.values()))
@@ -136,81 +257,8 @@ async def deliver_service(update: Update, service: str):
         "برای استفاده مجدد /start را بزنید"
     )
 
-async def wallet_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [KeyboardButton("➕ شارژ کیف پول")],
-        [KeyboardButton("🔙 بازگشت به منوی اصلی")]
-    ]
-    await update.message.reply_text(
-        "مدیریت کیف پول:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
-    return PAYMENT_METHOD
-
-async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text == "➕ شارژ کیف پول":
-        keyboard = [
-            [KeyboardButton("💳 درگاه پرداخت"), KeyboardButton("📲 کارت به کارت")],
-            [KeyboardButton("🔙 بازگشت")]
-        ]
-        await update.message.reply_text(
-            "روش شارژ را انتخاب کنید:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
-        return CHARGE_AMOUNT
-    elif text == "🔙 بازگشت به منوی اصلی":
-        return await start(update, context)
-    return MAIN_MENU
-
-async def process_charge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    
-    # بررسی دکمه بازگشت
-    if text == "🔙 بازگشت":
-        return await wallet_menu(update, context)
-    
-    try:
-        # تبدیل متن به عدد
-        amount = int(text)
-        
-        # بررسی حداقل مبلغ
-        if amount < 10000:
-            await update.message.reply_text("حداقل مبلغ شارژ ۱۰,۰۰۰ تومان است.")
-            return CHARGE_AMOUNT
-        
-        # ایجاد کد پیگیری
-        ref_id = f"zibal_{random.randint(10000, 99999)}"
-        
-        # افزایش موجودی کاربر
-        update_balance(update.effective_user.id, amount)
-        
-        # ثبت تراکنش
-        with sqlite3.connect("bot.db") as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO transactions 
-                (user_id, amount, type, status, ref_id)
-                VALUES (?, ?, 'charge', 'completed', ?)
-            """, (update.effective_user.id, amount, ref_id))
-            conn.commit()
-        
-        # ارسال پیام موفقیت
-        await update.message.reply_text(
-            f"✅ موجودی شما با موفقیت {amount:,} تومان شارژ شد!\n"
-            f"کد پیگیری: {ref_id}\n\n"
-            f"💰 موجودی جدید: {get_user(update.effective_user.id)[1]:,} تومان"
-        )
-        return await start(update, context)
-        
-    except ValueError:
-        await update.message.reply_text(
-            "⚠️ لطفاً فقط عدد وارد کنید!\n"
-            "مثال: 50000 یا 100000"
-        )
-        return CHARGE_AMOUNT
-
 async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """منوی اشتراک"""
     keyboard = [
         [KeyboardButton("۱ ماهه - ۳۰,۰۰۰ تومان")],
         [KeyboardButton("۳ ماهه - ۸۰,۰۰۰ تومان")],
@@ -225,6 +273,7 @@ async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return SUBSCRIPTION_MENU
 
 async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش انتخاب اشتراک"""
     text = update.message.text
     if text == "🔙 بازگشت به منوی اصلی":
         return await start(update, context)
@@ -261,27 +310,26 @@ async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             await update.message.reply_text(
                 f"✅ اشتراک {plan} با موفقیت فعال شد!\n"
-                f"تاریخ انقضا: {expiry_date}"
+                f"تاریخ انقضا: {expiry_date}\n\n"
+                "برای بازگشت به منوی اصلی /start را بزنید."
             )
         else:
             await update.message.reply_text(
-                "موجودی کیف پول شما برای این اشتراک کافی نیست!"
+                "موجودی کیف پول شما برای این اشتراک کافی نیست!\n"
+                "لطفاً ابتدا کیف پول خود را شارژ کنید."
             )
-    return await start(update, context)
+    return MAIN_MENU
 
-async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.photo:
-        await update.message.reply_text(
-            "رسید پرداخت دریافت شد و در حال بررسی است.\n"
-            "پس از تایید، موجودی به کیف پول شما اضافه خواهد شد."
-        )
-    return await start(update, context)
-
+# --- تنظیم و اجرای ربات ---
 def main():
+    """تابع اصلی اجرای ربات"""
+    # مقداردهی اولیه دیتابیس
     init_db()
     
+    # ساخت برنامه ربات
     app = Application.builder().token(TOKEN).build()
     
+    # مدیریت مکالمات
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
@@ -293,8 +341,7 @@ def main():
                 MessageHandler(filters.Regex("^🔙 بازگشت"), start)
             ],
             PAYMENT_METHOD: [
-                MessageHandler(filters.Regex("^💳 درگاه پرداخت$"), lambda u,c: process_charge(u,c)),
-                MessageHandler(filters.Regex("^📲 کارت به کارت$"), lambda u,c: confirm_card_payment(u,c)),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_payment_method),
                 MessageHandler(filters.Regex("^🔙 بازگشت"), start)
             ],
             CHARGE_AMOUNT: [

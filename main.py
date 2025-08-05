@@ -10,14 +10,14 @@ BOT_TOKEN = os.getenv("bot-token")
 with open('estekhare.json', encoding='utf-8') as f:
     estekhare_data = json.load(f)
 
-with open('doa.json', encoding='utf-8') as f:
-    doa_data = json.load(f)
+with open('gooshayesh.json', encoding='utf-8') as f:
+    gooshayesh_data = json.load(f)
 
 with open('hafez.json', encoding='utf-8') as f:
     hafez_data = json.load(f)
 
 # تعریف وضعیت‌ها
-MENU, ESTEKHARE_TOPIC, DOA_TOPIC, FAL_HAFEZ_TOPIC = range(4)
+MENU, ESTEKHARE_TOPIC, gooshayesh_TOPIC, FAL_HAFEZ_TOPIC = range(4)
 
 # شروع ربات و نمایش منوی اصلی
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -39,7 +39,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ESTEKHARE_TOPIC
     elif text == "📜 دعای گشایش":
         await update.message.reply_text("موضوع دعا را وارد کن:")
-        return DOA_TOPIC
+        return gooshayesh_TOPIC
     elif text == "📖 فال حافظ":
         await update.message.reply_text("موضوع موردنظر برای فال حافظ را وارد کن:")
         return FAL_HAFEZ_TOPIC
@@ -55,9 +55,9 @@ async def estekhare_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await start(update, context)
 
 # دعا
-async def doa_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def gooshayesh_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic = update.message.text.strip()
-    result = doa_data.get(topic, "موضوعی با این عنوان پیدا نشد.")
+    result = gooshayesh_data.get(topic, "موضوعی با این عنوان پیدا نشد.")
     await update.message.reply_text(result)
     return await start(update, context)
 
@@ -82,7 +82,7 @@ if __name__ == '__main__':
         states={
             MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)],
             ESTEKHARE_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, estekhare_handler)],
-            DOA_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, doa_handler)],
+            gooshayesh_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, gooshayesh_handler)],
             FAL_HAFEZ_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, hafez_handler)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],

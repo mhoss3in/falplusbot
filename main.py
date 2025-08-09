@@ -63,6 +63,8 @@ class DatabaseManager:
     
     def init_db(self):
         cursor = self.conn.cursor()
+        
+        # Create users table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -71,6 +73,8 @@ class DatabaseManager:
                 register_date TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Create transactions table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,6 +88,8 @@ class DatabaseManager:
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
+        
+        # Create service_history table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS service_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,7 +99,9 @@ class DatabaseManager:
                 result TEXT,
                 date TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
         """)
+        
         self.conn.commit()
     
     def get_user(self, user_id):

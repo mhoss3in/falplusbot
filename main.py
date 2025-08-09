@@ -79,7 +79,7 @@ class DatabaseManager:
                 type TEXT,
                 status TEXT,
                 date TEXT DEFAULT CURRENT_TIMESTAMP,
-                ref_id TEXT,
+                ref_id TEXT UNIQUE,
                 admin_approved BOOLEAN DEFAULT 0,
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
@@ -93,7 +93,6 @@ class DatabaseManager:
                 result TEXT,
                 date TEXT DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
-            )
         """)
         self.conn.commit()
     
@@ -116,7 +115,7 @@ class DatabaseManager:
             if amount != 0:
                 cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
             
-            ref_id = f"{transaction_type}_{user_id}_{amount}_{random.randint(1000, 9999)}"
+            ref_id = f"{transaction_type}_{user_id}_{int(datetime.now().timestamp())}_{random.randint(1000, 9999)}"
             cursor.execute("""
                 INSERT INTO transactions 
                 (user_id, amount, type, status, ref_id, admin_approved)
@@ -368,21 +367,32 @@ async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYP
     
     if update.message.photo:
         user_id = update.effective_user.id
-        amount = context.user_data.get('charge_amount', 10000)
+        amount = context.user_data.get('charge_amount', 0)
         
-        # ثبت تراکنش به صورت pending
+        if amount <= 0:
+            await update.message.reply_text("مبلغ پرداخت نامعتبر است!")
+            return CHARGE_AMOUNT
+        
+        # ثبت تراکنش
         success, ref_id = db.update_balance(user_id, 0, "charge", False)
         
         if success:
-            # ذخیره مقدار واقعی شارژ در context برای استفاده بعدی
-            context.user_data[f'charge_{ref_id}'] = amount
+            # ذخیره اطلاعات با جزئیات کامل
+            context.user_data[f'charge_{ref_id}'] = {
+                'amount': amount,
+                'user_id': user_id,
+                'photo_id': update.message.photo[-1].file_id,
+                'timestamp': datetime.now().isoformat(),
+                'expiry': (datetime.now() + timedelta(hours=24)).isoformat()
+            }
             
             # ارسال به ادمین برای تایید
             admin_text = (
                 f"📌 درخواست شارژ جدید\n\n"
                 f"👤 کاربر: {update.effective_user.full_name} (آیدی: {user_id})\n"
                 f"💰 مبلغ: {amount:,} تومان\n"
-                f"🆔 کد پیگیری: {ref_id}"
+                f"🆔 کد پیگیری: {ref_id}\n"
+                f"⏳ انقضا: {(datetime.now() + timedelta(hours=24)).strftime('%Y-%m-%d %H:%M')}"
             )
             
             keyboard = [
@@ -391,7 +401,6 @@ async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # ارسال پیام به ادمین
             try:
                 sent_msg = await context.bot.send_photo(
                     chat_id=ADMIN_ID,
@@ -399,7 +408,6 @@ async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                     caption=admin_text,
                     reply_markup=reply_markup
                 )
-                # ذخیره message_id برای ویرایش بعدی
                 context.user_data[f'admin_msg_{ref_id}'] = sent_msg.message_id
             except Exception as e:
                 logger.error(f"خطا در ارسال پیام به ادمین: {e}")
@@ -412,7 +420,8 @@ async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(
                 "✅ رسید پرداخت دریافت شد و برای تایید به ادمین ارسال شد.\n"
                 "پس از تایید ادمین، موجودی به کیف پول شما اضافه خواهد شد.\n\n"
-                f"🆔 کد پیگیری: {ref_id}",
+                f"🆔 کد پیگیری: {ref_id}\n"
+                f"⏳ اعتبار درخواست: 24 ساعت",
                 reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
             )
         else:
@@ -439,109 +448,85 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
     
     action, ref_id = query.data.split('_', 1)
     
+    # بررسی وجود داده پرداخت
+    charge_data = context.user_data.get(f'charge_{ref_id}')
+    if not charge_data:
+        try:
+            await query.edit_message_caption(
+                caption="⚠️ اطلاعات پرداخت یافت نشد یا منقضی شده است.",
+                reply_markup=None
+            )
+        except Exception as e:
+            logger.error(f"خطا در ویرایش پیام: {e}")
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"⚠️ اطلاعات پرداخت برای ref_id {ref_id} یافت نشد!"
+            )
+        return
+    
+    amount = charge_data['amount']
+    user_id = charge_data['user_id']
+    
     try:
-        # دریافت مقدار شارژ از context
-        amount = context.user_data.get(f'charge_{ref_id}')
-        if not amount:
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text="خطا: اطلاعات پرداخت یافت نشد!"
-                )
-            except Exception as e:
-                logger.error(f"خطا در ارسال پیام به ادمین: {e}")
-            return
-        
         with sqlite3.connect("bot.db") as conn:
             cursor = conn.cursor()
             
-            # دریافت اطلاعات کاربر از تراکنش
-            cursor.execute("SELECT user_id FROM transactions WHERE ref_id = ?", (ref_id,))
-            transaction = cursor.fetchone()
-            
-            if not transaction:
+            if action == "approve":
+                cursor.execute("BEGIN TRANSACTION")
+                
+                # افزایش موجودی کاربر
+                cursor.execute("""
+                    UPDATE users 
+                    SET balance = balance + ? 
+                    WHERE user_id = ?
+                """, (amount, user_id))
+                
+                # تایید تراکنش
+                cursor.execute("""
+                    UPDATE transactions 
+                    SET status = 'completed', 
+                        admin_approved = 1,
+                        amount = ?
+                    WHERE ref_id = ? AND status = 'pending'
+                """, (amount, ref_id))
+                
+                conn.commit()
+                
+                # اطلاع به کاربر
+                new_balance = db.get_user_balance(user_id)
                 try:
                     await context.bot.send_message(
-                        chat_id=ADMIN_ID,
-                        text="تراکنش یافت نشد!"
+                        chat_id=user_id,
+                        text=f"✅ پرداخت شما تایید شد!\n\n"
+                             f"💰 مبلغ {amount:,} تومان به کیف پول شما اضافه شد.\n"
+                             f"💳 موجودی جدید: {new_balance:,} تومان"
                     )
                 except Exception as e:
-                    logger.error(f"خطا در ارسال پیام به ادمین: {e}")
-                return
+                    logger.error(f"خطا در ارسال پیام به کاربر: {e}")
                 
-            user_id = transaction[0]
-            
-            if action == "approve":
+                # حذف داده موقت
+                if f'charge_{ref_id}' in context.user_data:
+                    del context.user_data[f'charge_{ref_id}']
+                if f'admin_msg_{ref_id}' in context.user_data:
+                    del context.user_data[f'admin_msg_{ref_id}']
+                
+                # ویرایش پیام اصلی
                 try:
-                    # شروع تراکنش دیتابیس
-                    cursor.execute("BEGIN TRANSACTION")
-                    
-                    # افزایش موجودی کاربر
-                    cursor.execute("""
-                        UPDATE users 
-                        SET balance = balance + ? 
-                        WHERE user_id = ?
-                    """, (amount, user_id))
-                    
-                    # تایید تراکنش
-                    cursor.execute("""
-                        UPDATE transactions 
-                        SET status = 'completed', 
-                            admin_approved = 1,
-                            amount = ?
-                        WHERE ref_id = ? AND status = 'pending'
-                    """, (amount, ref_id))
-                    
-                    # تأیید تغییرات
-                    conn.commit()
-                    
-                    # اطلاع به کاربر
-                    new_balance = db.get_user_balance(user_id)
-                    try:
-                        await context.bot.send_message(
-                            chat_id=user_id,
-                            text=f"✅ پرداخت شما تایید شد!\n\n"
-                                 f"💰 مبلغ {amount:,} تومان به کیف پول شما اضافه شد.\n"
-                                 f"💳 موجودی جدید: {new_balance:,} تومان"
-                        )
-                    except Exception as e:
-                        logger.error(f"خطا در ارسال پیام به کاربر: {e}")
-                    
-                    # حذف داده موقت از context
-                    if f'charge_{ref_id}' in context.user_data:
-                        del context.user_data[f'charge_{ref_id}']
-                    
-                    # ویرایش پیام اصلی
-                    try:
-                        await query.edit_message_caption(
-                            caption=f"✅ تراکنش {ref_id} تایید شد.\n\n"
-                                   f"مبلغ {amount:,} تومان به حساب کاربر اضافه شد.\n"
-                                   f"موجودی جدید کاربر: {new_balance:,} تومان",
-                            reply_markup=None
-                        )
-                    except Exception as e:
-                        # اگر ویرایش caption ناموفق بود، پیام جدید ارسال کن
-                        logger.error(f"خطا در ویرایش پیام: {e}")
-                        await context.bot.send_message(
-                            chat_id=ADMIN_ID,
-                            text=f"✅ تراکنش {ref_id} تایید شد.\n\n"
-                                 f"مبلغ {amount:,} تومان به حساب کاربر اضافه شد.\n"
-                                 f"موجودی جدید کاربر: {new_balance:,} تومان"
-                        )
+                    await query.edit_message_caption(
+                        caption=f"✅ تراکنش {ref_id} تایید شد.\n\n"
+                               f"مبلغ {amount:,} تومان به حساب کاربر اضافه شد.\n"
+                               f"موجودی جدید کاربر: {new_balance:,} تومان",
+                        reply_markup=None
+                    )
                 except Exception as e:
-                    conn.rollback()
-                    logger.error(f"خطا در پردازش تراکنش: {e}")
-                    try:
-                        await query.edit_message_caption(
-                            caption=f"❌ خطا در پردازش تراکنش: {str(e)}",
-                            reply_markup=None
-                        )
-                    except:
-                        await context.bot.send_message(
-                            chat_id=ADMIN_ID,
-                            text=f"❌ خطا در پردازش تراکنش: {str(e)}"
-                        )
-                    
+                    logger.error(f"خطا در ویرایش پیام: {e}")
+                    await context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"✅ تراکنش {ref_id} تایید شد.\n\n"
+                             f"مبلغ {amount:,} تومان به حساب کاربر اضافه شد.\n"
+                             f"موجودی جدید کاربر: {new_balance:,} تومان"
+                    )
+                
             elif action == "reject":
                 # رد تراکنش
                 cursor.execute("""
@@ -552,9 +537,11 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 """, (ref_id,))
                 conn.commit()
                 
-                # حذف داده موقت از context
+                # حذف داده موقت
                 if f'charge_{ref_id}' in context.user_data:
                     del context.user_data[f'charge_{ref_id}']
+                if f'admin_msg_{ref_id}' in context.user_data:
+                    del context.user_data[f'admin_msg_{ref_id}']
                 
                 # اطلاع به کاربر
                 try:
@@ -625,7 +612,6 @@ async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
         price = SUBSCRIPTIONS[plan]["price"]
         
         if user_balance >= price:
-            # تأیید نهایی از کاربر
             keyboard = [
                 [KeyboardButton(f"✅ بله، اشتراک {plan} را فعال کن")],
                 [KeyboardButton("❌ خیر، انصراف")]

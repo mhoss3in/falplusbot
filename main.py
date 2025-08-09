@@ -358,6 +358,51 @@ async def handle_topic_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     service_type = context.user_data['selected_service']
     user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    
+    # بررسی وضعیت اشتراک
+    subscription_active = False
+    if user and user[2]:  # subscription_expiry
+        expiry_date = datetime.strptime(user[2], "%Y-%m-%d")
+        if expiry_date > datetime.now():
+            subscription_active = True
+    
+    # اگر اشتراک فعال دارد
+    if subscription_active:
+        try:
+            with open(f'{service_type}.json', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            available_results = [v for k, v in data.items() if topic.lower() in k.lower()]
+            
+            if not available_results:
+                await update.message.reply_text(
+                    "نتیجه‌ای برای این موضوع یافت نشد.\n"
+                    "لطفاً موضوع دیگری را امتحان کنید.",
+                    reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت")]], resize_keyboard=True)
+                )
+                return TOPIC_INPUT
+            
+            selected_result = random.choice(available_results)
+            db.save_service_history(user_id, service_type, topic, selected_result)
+            
+            await update.message.reply_text(
+                f"🔮 نتیجه {service_type} برای موضوع '{topic}':\n\n{selected_result}\n\n"
+                f"✅ از اشتراک فعال شما استفاده شد (انقضا: {user[2]})\n"
+                "برای استفاده مجدد /start را بزنید",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+            )
+            return MAIN_MENU
+        
+        except Exception as e:
+            logger.error(f"خطا در پردازش سرویس: {e}")
+            await update.message.reply_text(
+                "خطایی در سیستم رخ داده است! لطفاً بعداً تلاش کنید.",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+            )
+            return MAIN_MENU
+    
+    # اگر اشتراک فعال ندارد
     user_balance = db.get_user_balance(user_id)
     
     if user_balance < PRICES[service_type]:
@@ -365,8 +410,8 @@ async def handle_topic_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"موجودی شما برای این سرویس کافی نیست!\n"
             f"قیمت سرویس: {PRICES[service_type]:,} تومان\n"
             f"موجودی فعلی: {user_balance:,} تومان\n\n"
-            "لطفاً ابتدا کیف پول خود را شارژ کنید.",
-            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("💰 شارژ کیف پول"), KeyboardButton("🔙 بازگشت")]], resize_keyboard=True)
+            "لطفاً ابتدا کیف پول خود را شارژ کنید یا اشتراک بخرید.",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("💰 شارژ کیف پول"), KeyboardButton("🔔 اشتراک"), KeyboardButton("🔙 بازگشت")]], resize_keyboard=True)
         )
         return MAIN_MENU
     

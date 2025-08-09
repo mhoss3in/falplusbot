@@ -113,7 +113,7 @@ class DatabaseManager:
             cursor = self.conn.cursor()
             cursor.execute("INSERT OR IGNORE INTO users (user_id, balance) VALUES (?, 0)", (user_id,))
             
-            if amount != 0:  # فقط اگر مقدار غیرصفر است موجودی را آپدیت کن
+            if amount != 0:
                 cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
             
             ref_id = f"{transaction_type}_{user_id}_{amount}_{random.randint(1000, 9999)}"
@@ -391,12 +391,23 @@ async def confirm_card_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            await context.bot.send_photo(
-                chat_id=ADMIN_ID,
-                photo=update.message.photo[-1].file_id,
-                caption=admin_text,
-                reply_markup=reply_markup
-            )
+            # ارسال پیام به ادمین
+            try:
+                sent_msg = await context.bot.send_photo(
+                    chat_id=ADMIN_ID,
+                    photo=update.message.photo[-1].file_id,
+                    caption=admin_text,
+                    reply_markup=reply_markup
+                )
+                # ذخیره message_id برای ویرایش بعدی
+                context.user_data[f'admin_msg_{ref_id}'] = sent_msg.message_id
+            except Exception as e:
+                logger.error(f"خطا در ارسال پیام به ادمین: {e}")
+                await update.message.reply_text(
+                    "خطا در ارسال درخواست به ادمین! لطفاً بعداً تلاش کنید.",
+                    reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
+                )
+                return MAIN_MENU
             
             await update.message.reply_text(
                 "✅ رسید پرداخت دریافت شد و برای تایید به ادمین ارسال شد.\n"
@@ -420,7 +431,10 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     
     if query.from_user.id != ADMIN_ID:
-        await query.edit_message_text("شما دسترسی ادمین ندارید!")
+        try:
+            await query.message.reply_text("شما دسترسی ادمین ندارید!")
+        except Exception as e:
+            logger.error(f"خطا در ارسال پیام به غیرادمین: {e}")
         return
     
     action, ref_id = query.data.split('_', 1)
@@ -429,7 +443,13 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         # دریافت مقدار شارژ از context
         amount = context.user_data.get(f'charge_{ref_id}')
         if not amount:
-            await query.edit_message_text("خطا: اطلاعات پرداخت یافت نشد!")
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text="خطا: اطلاعات پرداخت یافت نشد!"
+                )
+            except Exception as e:
+                logger.error(f"خطا در ارسال پیام به ادمین: {e}")
             return
         
         with sqlite3.connect("bot.db") as conn:
@@ -440,7 +460,13 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             transaction = cursor.fetchone()
             
             if not transaction:
-                await query.edit_message_text("تراکنش یافت نشد!")
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text="تراکنش یافت نشد!"
+                    )
+                except Exception as e:
+                    logger.error(f"خطا در ارسال پیام به ادمین: {e}")
                 return
                 
             user_id = transaction[0]
@@ -485,19 +511,36 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     if f'charge_{ref_id}' in context.user_data:
                         del context.user_data[f'charge_{ref_id}']
                     
-                    await query.edit_message_caption(
-                        caption=f"✅ تراکنش {ref_id} تایید شد.\n\n"
-                               f"مبلغ {amount:,} تومان به حساب کاربر اضافه شد.\n"
-                               f"موجودی جدید کاربر: {new_balance:,} تومان",
-                        reply_markup=None
-                    )
+                    # ویرایش پیام اصلی
+                    try:
+                        await query.edit_message_caption(
+                            caption=f"✅ تراکنش {ref_id} تایید شد.\n\n"
+                                   f"مبلغ {amount:,} تومان به حساب کاربر اضافه شد.\n"
+                                   f"موجودی جدید کاربر: {new_balance:,} تومان",
+                            reply_markup=None
+                        )
+                    except Exception as e:
+                        # اگر ویرایش caption ناموفق بود، پیام جدید ارسال کن
+                        logger.error(f"خطا در ویرایش پیام: {e}")
+                        await context.bot.send_message(
+                            chat_id=ADMIN_ID,
+                            text=f"✅ تراکنش {ref_id} تایید شد.\n\n"
+                                 f"مبلغ {amount:,} تومان به حساب کاربر اضافه شد.\n"
+                                 f"موجودی جدید کاربر: {new_balance:,} تومان"
+                        )
                 except Exception as e:
                     conn.rollback()
                     logger.error(f"خطا در پردازش تراکنش: {e}")
-                    await query.edit_message_caption(
-                        caption=f"❌ خطا در پردازش تراکنش: {str(e)}",
-                        reply_markup=None
-                    )
+                    try:
+                        await query.edit_message_caption(
+                            caption=f"❌ خطا در پردازش تراکنش: {str(e)}",
+                            reply_markup=None
+                        )
+                    except:
+                        await context.bot.send_message(
+                            chat_id=ADMIN_ID,
+                            text=f"❌ خطا در پردازش تراکنش: {str(e)}"
+                        )
                     
             elif action == "reject":
                 # رد تراکنش
@@ -523,17 +566,31 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 except Exception as e:
                     logger.error(f"خطا در ارسال پیام به کاربر: {e}")
                 
-                await query.edit_message_caption(
-                    caption=f"❌ تراکنش {ref_id} رد شد.",
-                    reply_markup=None
-                )
+                # ویرایش پیام اصلی
+                try:
+                    await query.edit_message_caption(
+                        caption=f"❌ تراکنش {ref_id} رد شد.",
+                        reply_markup=None
+                    )
+                except Exception as e:
+                    logger.error(f"خطا در ویرایش پیام: {e}")
+                    await context.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"❌ تراکنش {ref_id} رد شد."
+                    )
                 
     except Exception as e:
         logger.error(f"خطا در پردازش درخواست ادمین: {e}")
-        await query.edit_message_caption(
-            caption=f"❌ خطا در پردازش درخواست: {str(e)}",
-            reply_markup=None
-        )
+        try:
+            await query.edit_message_caption(
+                caption=f"❌ خطا در پردازش درخواست: {str(e)}",
+                reply_markup=None
+            )
+        except:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"❌ خطا در پردازش درخواست: {str(e)}"
+            )
 
 async def subscription_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [

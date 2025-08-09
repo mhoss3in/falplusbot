@@ -693,6 +693,7 @@ async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=ReplyKeyboardMarkup([[KeyboardButton("💰 شارژ کیف پول"), KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
             )
             return MAIN_MENU
+    
     elif text.startswith("✅ بله"):
         plan = context.user_data.get('selected_plan')
         if not plan:
@@ -702,18 +703,36 @@ async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE
         success, expiry_date = db.update_subscription(user_id, plan)
         
         if success:
+            # پاکسازی داده‌های موقت
+            if 'selected_plan' in context.user_data:
+                del context.user_data['selected_plan']
+            
+            keyboard = [
+                [KeyboardButton("📿 استخاره"), KeyboardButton("📜 دعای گشایش")],
+                [KeyboardButton("📖 فال حافظ")],
+                [KeyboardButton("💰 شارژ کیف پول"), KeyboardButton("🔔 اشتراک")],
+                [KeyboardButton("📋 تاریخچه پرداخت‌ها"), KeyboardButton("📜 تاریخچه خدمات")]
+            ]
+            
             await update.message.reply_text(
                 f"✅ اشتراک {plan} با موفقیت فعال شد!\n"
                 f"تاریخ انقضا: {expiry_date}\n\n"
-                "برای بازگشت به منوی اصلی /start را بزنید."
+                "لطفاً از منوی زیر گزینه مورد نظر خود را انتخاب کنید:",
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
             )
         else:
             await update.message.reply_text(
                 "خطا در فعال‌سازی اشتراک! لطفاً بعداً تلاش کنید.",
                 reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 بازگشت به منوی اصلی")]], resize_keyboard=True)
             )
+        
         return MAIN_MENU
+    
     elif text.startswith("❌ خیر"):
+        # پاکسازی داده‌های موقت
+        if 'selected_plan' in context.user_data:
+            del context.user_data['selected_plan']
+        
         return await start(update, context)
     
     return MAIN_MENU
